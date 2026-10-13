@@ -25,9 +25,9 @@ def check(name, cond, detail=""):
 
 
 print("=" * 92)
-print("1. 真实样本: test_grok.html (grok.com 被 CF 封禁)")
+print("1. 真实样本: grok.com 被 CF 封禁的响应 (已脱敏)")
 print("=" * 92)
-sample = (ROOT / "test_grok.html")
+sample = ROOT / "tests" / "fixtures" / "cf_block_grok.html"
 check("样本文件存在", sample.is_file(), str(sample))
 html = sample.read_text(encoding="utf-8", errors="replace")
 
@@ -38,7 +38,7 @@ print(f"  ray_id={c.ray_id}  blocked_host={c.blocked_host}")
 check("403 + CF 封禁页 -> cf_blocked", c.kind == CF_BLOCKED, c.kind)
 check("判为不可用", c.available is False)
 check("识别出是 Cloudflare", c.is_cloudflare)
-check("提取到 Ray ID", bool(c.ray_id), c.ray_id)
+check("提取到 Ray ID (脱敏后为固定值)", bool(c.ray_id), c.ray_id)
 check("提取到被封站点", c.blocked_host == "grok.com", c.blocked_host)
 
 print()

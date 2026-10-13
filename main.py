@@ -132,12 +132,26 @@ class Reporter:
                     f"<{r.error[:60]}>")
             return
         if r.ok:
-            gem = r.gemini.upper()[:9]
-            ag = r.antigravity.upper()[:9]
-            self._w(f"[OK]   {r.protocol:9} {cc:2} {rtt:>8}  {r.tag[:36]}  "
-                    f"Gemini {gem:9} Antigravity {ag}")
+            # 有分类结果时展示分类结论, 否则回退到 Google 维度
+            if r.categories:
+                parts = " ".join(
+                    f"{k.upper()} {str(v.get('verdict', '?')).upper()[:9]}"
+                    for k, v in r.categories.items())
+                self._w(f"[OK]   {r.protocol:9} {cc:2} {rtt:>8}  {r.tag[:34]:36}  {parts}")
+            else:
+                gem = r.gemini.upper()[:9]
+                ag = r.antigravity.upper()[:9]
+                self._w(f"[OK]   {r.protocol:9} {cc:2} {rtt:>8}  {r.tag[:36]}  "
+                        f"Gemini {gem:9} Antigravity {ag}")
         else:
-            reason = r.gemini_reason or r.google or "不可用"
+            if r.categories:
+                # 取第一个非 available 的分类原因
+                reason = next(
+                    (str(v.get("reason", "")) for v in r.categories.values()
+                     if v.get("verdict") != "available"),
+                    "不可用")
+            else:
+                reason = r.gemini_reason or r.google or "不可用"
             self._w(f"[NO]   {r.protocol:9} {cc:2} {rtt:>8}  {r.tag[:36]}  "
                     f"<{reason[:56]}>")
 
@@ -148,18 +162,36 @@ class Reporter:
         self._w("=" * 96)
         self._w(f"  总节点        : {s['total']}")
         self._w(f"  综合可用      : {s['usable']}")
-        self._w(f"  Google 可达   : {s['google_ok']}")
-        self._w(f"  Gemini 可用   : {s['gemini_available']}  (可能可用 {s['gemini_likely']})")
-        self._w(f"  Antigravity   : {s['antigravity_available']}  (跟随 Gemini)")
+
+        # 有分类结果时, 按分类给结论 (只展示本次检测的分类)
+        cats = s.get("categories") or {}
+        if cats:
+            from core.categories import all_categories
+            labels = all_categories()
+            for key, st in cats.items():
+                label = labels.get(key, key.upper())
+                self._w(f"  {label:^14}: 可用 {st.get('available', 0)}  "
+                        f"受限 {st.get('blocked', 0)}  "
+                        f"不可用 {st.get('unavailable', 0)}")
+                for sk, sv in (st.get("services") or {}).items():
+                    detail = "  ".join(f"{k} {v}" for k, v in sv.items())
+                    self._w(f"      {sk:12}: {detail}")
+        else:
+            self._w(f"  Google 可达   : {s['google_ok']}")
+            self._w(f"  Gemini 可用   : {s['gemini_available']}  (可能可用 {s['gemini_likely']})")
+            self._w(f"  Antigravity   : {s['antigravity_available']}  (跟随 Gemini)")
+
         if s.get("risk_high"):
             self._w(f"  高风险(代理/VPN): {s['risk_high']}")
         # 三个延迟口径分别展示, 避免把"含 body 下载"的数字误当节点速度
         self._w(f"  链路 RTT      : 平均 {s.get('avg_rtt_ms', 0)} ms   "
                 f"最快 {s.get('min_rtt_ms', 0)} ms      <- 推荐比较口径")
-        self._w(f"  Google 首字节 : 平均 {s.get('avg_ttfb_ms', 0)} ms   "
-                f"最快 {s.get('min_ttfb_ms', 0)} ms")
-        self._w(f"  Google 端到端 : 平均 {s.get('avg_latency_ms', 0)} ms   "
-                f"最快 {s.get('min_latency_ms', 0)} ms   (含下载首页)")
+        # 首字节/端到端 只在测 GOOGLE 时有意义 (它们量的是 google.com)
+        if not cats:
+            self._w(f"  Google 首字节 : 平均 {s.get('avg_ttfb_ms', 0)} ms   "
+                    f"最快 {s.get('min_ttfb_ms', 0)} ms")
+            self._w(f"  Google 端到端 : 平均 {s.get('avg_latency_ms', 0)} ms   "
+                    f"最快 {s.get('min_latency_ms', 0)} ms   (含下载首页)")
         if s["countries"]:
             tops = ", ".join(f"{k}:{v}" for k, v in list(s["countries"].items())[:12])
             self._w(f"  出口地区分布  : {tops}")
@@ -178,15 +210,24 @@ def write_outputs(
     results_path: Path,
     pool_path: Path,
     only_usable: bool,
+    pool_suffix: str = "",
 ) -> int:
-    """写 results.json 与 代理池文件, 返回写入代理池的节点数."""
+    """写 results.json 与 代理池文件, 返回写入代理池的节点数.
+
+    pool_suffix: 分类标识 (如 "xai"); 非空时池文件名会带上它,
+                 避免测 XAI 的结果覆盖掉 GOOGLE 的代理池.
+    """
     ordered = sort_results(results)
 
-    # results.json: 全量明细
+    # results.json: 全量明细 (按分类分文件, 避免互相覆盖)
+    if pool_suffix and results_path.name == "results.json":
+        results_path = results_path.with_name(f"results_{pool_suffix}.json")
     payload = [r.to_dict() for r in ordered]
     write_text_nobom(results_path, json.dumps(payload, ensure_ascii=False, indent=2))
 
     # 代理池: 只要可用的原始 URI (可直接被其他工具消费)
+    if pool_suffix:
+        pool_path = pool_path.with_name(f"proxiers_{pool_suffix}.txt")
     usable = [r for r in ordered if r.ok]
     lines = []
     for r in usable:
@@ -218,6 +259,12 @@ def build_argparser() -> argparse.ArgumentParser:
     p.add_argument("--limit", type=int, help="只测试前 N 个节点")
     p.add_argument("--kernel", choices=["auto", "sing-box", "xray"],
                    help="内核选择策略")
+    p.add_argument("--category", "-C", action="append", default=None,
+                   metavar="KEY",
+                   help="只检测指定分类 (可重复): xai / google. "
+                        "不指定则按配置或全部分类")
+    p.add_argument("--list-categories", action="store_true",
+                   help="列出所有分类后退出")
     p.add_argument("--no-antigravity", action="store_true",
                    help="跳过 Antigravity 检测 (更快)")
     p.add_argument("--only-usable", action="store_true",
@@ -235,6 +282,28 @@ def main(argv: list[str] | None = None) -> int:
     load_env(HERE / ".env")
 
     args = build_argparser().parse_args(argv)
+
+    # ---- 列出分类
+    if args.list_categories:
+        from core.categories import all_categories
+        cats = all_categories()
+        print("可用分类:")
+        for k, label in cats.items():
+            print(f"  {k:10} {label}")
+        return 0
+
+    # ---- 分类选择: 命令行 > .env > 默认 (全部)
+    from core.categories import REGISTRY, all_categories
+    if args.category:
+        chosen = list(dict.fromkeys(args.category))   # 去重保序
+    else:
+        env_cat = env_path("CATEGORIES", "").strip()
+        chosen = [c.strip() for c in env_cat.split(",") if c.strip()]
+    unknown = [c for c in chosen if c not in REGISTRY]
+    if unknown:
+        print(f"[错误] 未知分类: {unknown}", file=sys.stderr)
+        print(f"       可用: {list(all_categories())}", file=sys.stderr)
+        return 2
 
     # ---- 配置合并: 命令行 > .env > 默认
     in_file = Path(args.input or env_path("NODES_FILE", "proxiers.txt"))
@@ -351,6 +420,7 @@ def main(argv: list[str] | None = None) -> int:
         concurrency=concurrency,
         start_timeout=start_timeout,
         on_event=on_event,
+        categories=chosen,
     )
 
     t0 = time.time()
@@ -369,9 +439,13 @@ def main(argv: list[str] | None = None) -> int:
     reporter.footer(summary, elapsed)
 
     # ---- 输出
-    n_pool = write_outputs(results, out_file, pool_file, only_usable)
-    print(f"  结果明细      : {out_file}  ({len(results)} 条)")
-    print(f"  可用代理池    : {pool_file}  ({n_pool} 条)")
+    # 单个分类时, 结果与代理池按分类分文件, 避免覆盖别的分类
+    suffix = chosen[0] if len(chosen) == 1 else ""
+    n_pool = write_outputs(results, out_file, pool_file, only_usable, suffix)
+    out_name = out_file.with_name(f"results_{suffix}.json").name if suffix else out_file.name
+    pool_name = pool_file.with_name(f"proxiers_{suffix}.txt").name if suffix else pool_file.name
+    print(f"  结果明细      : {out_name}  ({len(results)} 条)")
+    print(f"  可用代理池    : {pool_name}  ({n_pool} 条)")
     if args.clean_configs:
         launcher.cleanup_configs(keep=False)
         print("  临时配置      : 已清理")

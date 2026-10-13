@@ -65,6 +65,17 @@ class NodeResult:
     errors: list[str] = field(default_factory=list)
     probes: list[dict[str, Any]] = field(default_factory=list)  # 各次探测明细
 
+    # ---- 分类体检结果 ----
+    # 结构: { "xai": {"verdict":..., "reason":..., "services":{...},
+    #                 "reasons":{...}, "detail":{...}}, ... }
+    # 只包含本次实际检测的分类; 未检测的分类不会出现在这里.
+    categories: dict[str, dict[str, Any]] = field(default_factory=dict)
+
+    def category_verdict(self, key: str) -> str:
+        """取某分类的结论, 未检测则返回空串."""
+        c = self.categories.get(key)
+        return str(c.get("verdict", "")) if isinstance(c, dict) else ""
+
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
@@ -80,6 +91,7 @@ class Tester:
         start_timeout: float = 12.0,
         on_event: Callable[[str, dict], None] | None = None,
         should_stop: Callable[[], bool] | None = None,
+        categories: list[str] | None = None,
     ):
         self.launcher = launcher
         self.detector = detector
@@ -88,6 +100,13 @@ class Tester:
         self.on_event = on_event
         # 返回 True 时尽快停止派发新任务 (已提交的任务会跑完)
         self.should_stop = should_stop
+        # 要执行的分类. None / 空 => 走旧的 detector 全量流程 (向后兼容).
+        self.categories = list(categories or [])
+        self._cat_impls: dict[str, Any] = {}
+        if self.categories:
+            from .categories import build as _build_cat
+            self._cat_impls = {k: _build_cat(k, detector.timeout)
+                               for k in self.categories}
         self._lock = threading.Lock()
         self._done = 0
         self._total = 0
@@ -154,6 +173,33 @@ class Tester:
                 and det.google == "success"
                 and det.gemini not in ("blocked", "unavailable")
             )
+
+            # ---- 分类体检 ----
+            # 有指定分类时, 额外跑该分类的检测 (只跑自己分类的项).
+            # 每个分类独立探测、独立判定, 互不影响.
+            for key, impl in self._cat_impls.items():
+                try:
+                    cr = impl.run(inst.proxy_url_socks)
+                    res.categories[key] = cr.to_dict()
+                    # 分类可能带回出口 IP / 地区 (XAI 也探 trace)
+                    if not res.ip and cr.detail.get("ip"):
+                        res.ip = str(cr.detail["ip"])
+                    if not res.country and cr.detail.get("country"):
+                        res.country = str(cr.detail["country"])
+                        res.country_name = country_name(res.country)
+                    if cr.probes:
+                        res.probes.extend(cr.probes)
+                except Exception as e:  # 单分类失败不影响其它
+                    res.categories[key] = {
+                        "category": key, "verdict": "unavailable",
+                        "reason": f"分类体检异常: {type(e).__name__}: {str(e)[:100]}",
+                        "services": {}, "reasons": {}, "detail": {},
+                    }
+
+            # 指定了分类时, 可用性以【分类结论】为准 —— 后端只做该分类的体检
+            if self._cat_impls:
+                verds = [str(v.get("verdict", "")) for v in res.categories.values()]
+                res.ok = bool(verds) and all(v == "available" for v in verds)
             return res
         except Exception as e:
             res.error = f"{type(e).__name__}: {e}"
@@ -284,6 +330,23 @@ def summarize(results: list[NodeResult]) -> dict[str, Any]:
     countries = Counter(r.country for r in results if r.country)
     protocols = Counter(r.protocol for r in results if r.protocol)
 
+    # ---- 分类维度统计 ----
+    # { "xai": {"available": 12, "blocked": 3, "unavailable": 5,
+    #           "services": {"grok": {"available": 12, ...}} }, ... }
+    cat_stats: dict[str, dict[str, Any]] = {}
+    for r in results:
+        for key, cdata in (r.categories or {}).items():
+            if not isinstance(cdata, dict):
+                continue
+            bucket = cat_stats.setdefault(key, {"available": 0, "blocked": 0,
+                                                "unavailable": 0, "unknown": 0,
+                                                "services": {}})
+            v = str(cdata.get("verdict", "unknown"))
+            bucket[v] = bucket.get(v, 0) + 1
+            for sk, sv in (cdata.get("services") or {}).items():
+                sb = bucket["services"].setdefault(sk, {})
+                sb[str(sv)] = sb.get(str(sv), 0) + 1
+
     return {
         "total": total,
         "usable": ok,
@@ -293,6 +356,7 @@ def summarize(results: list[NodeResult]) -> dict[str, Any]:
         "antigravity_available": ag_avail,
         "antigravity_likely": ag_likely,
         "risk_high": risk_high,
+        "categories": cat_stats,
         # 三个延迟口径各自给出 均值/最快, 便于不同角度比较
         "avg_rtt_ms": int(sum(rtts) / len(rtts)) if rtts else 0,
         "min_rtt_ms": min(rtts) if rtts else 0,

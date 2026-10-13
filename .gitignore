@@ -35,6 +35,8 @@ htmlcov/
 # ---- 代理节点列表 (含真实凭据, 绝对不能提交) ----
 proxiers.txt
 proxiers_google.txt
+proxiers_xai.txt
+proxiers_*.txt
 proxies.txt
 *.nodes
 nodes*.txt
@@ -44,6 +46,10 @@ nodes*.txt
 results.json
 results_*.json
 pool_*.txt
+
+# ---- 手工抓取的线上响应样本 (可能含出口 IP / Ray ID 等), 脱敏版放 tests/fixtures ----
+test_*.html
+!tests/fixtures/*.html
 
 # ---- 内核可执行文件 (体积大且受各自许可约束, 不随仓库分发) ----
 kernels/
