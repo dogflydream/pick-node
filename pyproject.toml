@@ -1,6 +1,6 @@
 [project]
 name = "proxy-tester"
-version = "3.0.0"
+version = "3.0.1"
 description = "代理节点批量体检工具: 检测出口地区 / Google / Gemini 可用性, 并导出可用节点 URI"
 readme = "README.md"
 requires-python = ">=3.10"
