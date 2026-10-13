@@ -179,6 +179,14 @@ class Tester:
             # 每个分类独立探测、独立判定, 互不影响.
             for key, impl in self._cat_impls.items():
                 try:
+                    # 把 detector 已探到的地区注入分类 (若分类支持),
+                    # 避免 trace 偶发失败时地区为空 -> 漏掉黑名单判定
+                    # (实测: HK 节点的 Antigravity 曾被误判为可用)
+                    if res.country and hasattr(impl, "set_known_country"):
+                        try:
+                            impl.set_known_country(res.country)
+                        except Exception:
+                            pass
                     cr = impl.run(inst.proxy_url_socks)
                     res.categories[key] = cr.to_dict()
                     # 分类可能带回出口 IP / 地区 (XAI 也探 trace)
@@ -198,6 +206,7 @@ class Tester:
 
             # 指定了分类时, 可用性以【分类结论】为准 —— 后端只做该分类的体检
             if self._cat_impls:
+                self._sync_legacy_fields(res)
                 verds = [str(v.get("verdict", "")) for v in res.categories.values()]
                 res.ok = bool(verds) and all(v == "available" for v in verds)
             return res
@@ -215,6 +224,57 @@ class Tester:
                 self._done += 1
                 self._emit("progress", {"done": self._done, "total": self._total,
                                         "tag": node.tag})
+
+    @staticmethod
+    def _sync_legacy_fields(res: NodeResult) -> None:
+        """把分类结论回填到旧版 Google 字段, 保持两种视图一致.
+
+        为什么需要: GOOGLE 分类的判定结果写在 categories["google"] 里, 而
+        表格/导出/一致性检查仍会读 google / gemini / antigravity 这些旧字段。
+        若不同步, 同一条结果会出现"分类说可用、旧字段说 blocked"的自相矛盾
+        (实测踩到过: 11 条记录两套值不一致)。
+        """
+        cats = res.categories or {}
+        g = cats.get("google")
+        if not isinstance(g, dict) or not g:
+            return
+        svcs = g.get("services") or {}
+        reasons = g.get("reasons") or {}
+
+        gv = str(svcs.get("google", ""))
+        if gv:
+            res.google = "success" if gv == "available" else "fail"
+            res.google_final_url = str((g.get("detail") or {}).get(
+                "google_final_url", "")) or res.google_final_url
+            res.google_status = int((g.get("detail") or {}).get(
+                "google_status", 0) or 0)
+
+        mv = str(svcs.get("gemini", ""))
+        if mv:
+            res.gemini = mv
+            res.gemini_reason = str(reasons.get("gemini", ""))
+        av = str(svcs.get("antigravity", ""))
+        if av:
+            res.antigravity = av
+            res.antigravity_reason = str(reasons.get("antigravity", ""))
+
+        det = g.get("detail") or {}
+        res.hk_redirect = bool(det.get("hk_redirect", res.hk_redirect))
+        res.risk_flags = list(det.get("risk_flags", res.risk_flags) or [])
+        if res.hk_redirect:
+            res.risk_level = "high"
+            res.risk_reason = "访问 www.google.com 被重定向到 www.google.com.hk"
+
+        # 硬规则兜底: Google 未通过时 Gemini 不得判可用.
+        # 放在这里再兜一次, 保证无论哪个分类实现都不会违反该不变式.
+        if res.google != "success" and res.gemini in ("available", "likely"):
+            prev = res.gemini
+            res.gemini = "unavailable"
+            res.gemini_reason = (
+                f"Google 未通过 —— 按'两者都 OK 才算可用'降级 (原判定 {prev})")
+            if res.antigravity == "available":
+                res.antigravity = "unavailable"
+                res.antigravity_reason = "跟随 Gemini (因 Google 未通过而降级)"
 
     # ------------------------------------------------------------ 批量
 
@@ -317,9 +377,13 @@ def summarize(results: list[NodeResult]) -> dict[str, Any]:
     # 延迟统计只计入链路真正可达的节点.
     # 否则像"剩余流量: xx GB"这种纯信息节点(并非代理)会以个位数毫秒混入,
     # 让"最快延迟"变成无意义的 1ms.
+    # 另加 120s 上限: 超时类的值(可达数百秒)不是延迟, 不能进统计.
+    MAX_MS = 120_000
+
     def vals(attr: str) -> list[int]:
         return [v for r in results
-                if r.reachable and (v := getattr(r, attr, 0)) and v > 0]
+                if r.reachable and (v := getattr(r, attr, 0))
+                and 0 < v < MAX_MS]
 
     rtts = vals("rtt_min_ms")
     ttfbs = vals("ttfb_ms")

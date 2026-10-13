@@ -212,22 +212,24 @@ def write_outputs(
     only_usable: bool,
     pool_suffix: str = "",
 ) -> int:
-    """写 results.json 与 代理池文件, 返回写入代理池的节点数.
+    """写结果文件与代理池文件, 返回写入代理池的节点数.
 
-    pool_suffix: 分类标识 (如 "xai"); 非空时池文件名会带上它,
-                 避免测 XAI 的结果覆盖掉 GOOGLE 的代理池.
+    pool_suffix: 分类标识 (如 "xai").
+      - 非空时, 结果/代理池都按分类分文件 (results_xai.json / proxiers_xai.txt),
+        绝不写主 results.json —— 否则一次 --category xai --limit 5 的试跑
+        会把之前 132 个节点的 Google 结果整个覆盖掉 (实际发生过).
+      - 空时写主文件 (全量流程).
     """
     ordered = sort_results(results)
 
-    # results.json: 全量明细 (按分类分文件, 避免互相覆盖)
-    if pool_suffix and results_path.name == "results.json":
+    if pool_suffix:
+        # 分类模式: 只写分类专属文件, 不碰主 results.json
         results_path = results_path.with_name(f"results_{pool_suffix}.json")
+        pool_path = pool_path.with_name(f"proxiers_{pool_suffix}.txt")
+
     payload = [r.to_dict() for r in ordered]
     write_text_nobom(results_path, json.dumps(payload, ensure_ascii=False, indent=2))
 
-    # 代理池: 只要可用的原始 URI (可直接被其他工具消费)
-    if pool_suffix:
-        pool_path = pool_path.with_name(f"proxiers_{pool_suffix}.txt")
     usable = [r for r in ordered if r.ok]
     lines = []
     for r in usable:

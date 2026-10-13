@@ -21,6 +21,11 @@ Gemini 与 Antigravity 可用性、延迟、综合可用性。
 
 ## 1. 特性
 
+- **按分类体检**：节点按用途分成 **XAI**（Grok Web）与 **GOOGLE**（Google / Gemini /
+  Antigravity）两大类，后续可继续加。**一个分类只测自己分类的项**，互不干扰；
+  结果分文件保存，切换分类即切换数据源。
+- **Cloudflare 智能判别**：403 **不能**直接判死 —— 本工具会读响应体区分
+  「CF 封禁页」（真不可用）与「CF 人机验证盾」（浏览器能过，节点其实可用）。见 §8.7
 - **多协议**：VLESS（含 Reality / Vision / ws / gRPC）、VMess、Trojan、
   Shadowsocks（含 2022）、Hysteria2（含端口跳跃 `mport` 与证书 pin `pinSHA256`）、TUIC
 - **每节点独立实例**：自动分配本地端口（默认 20001 起），自动生成临时配置，
@@ -29,12 +34,12 @@ Gemini 与 Antigravity 可用性、延迟、综合可用性。
 - **内核自动探测**：自动在 v2rayN 目录中找到 `sing-box.exe` / `xray.exe`，
   按协议自动选内核（Hysteria2 / TUIC 仅 sing-box 支持）
 - **不污染系统**：不读取系统代理设置，不会误用本机 v2rayN 的出口
-- **Web 面板**：深色数据面板，可按地区/协议/可用性/风险筛选、排序、搜索、勾选，
+- **Web 面板**：深色数据面板，分类页签 + 按地区/协议/结论筛选、排序、搜索、勾选，
   一键把可用节点导出成一行一个 URI
 - **网页端导入节点**：粘贴或拖入 `.txt` 即可导入，自动去重、自动忽略无效行，
   导入前先告诉你会新增多少 —— 不需要懂命令行或手动改文件
-- **网页端重新检测**：勾选节点即可在页面触发真实检测，
-  实时看进度，结果合并写回（不会冲掉其它节点的历史结果）
+- **网页端重新检测**：勾选节点即可在页面触发真实检测（只跑当前分类），
+  实时看进度，结果合并写回（不会冲掉其它分类或节点的历史结果）
 - **CLI**：无 GUI 依赖，也能纯命令行跑，实时进度输出
 
 
@@ -171,6 +176,8 @@ uv run python tests\test_import.py
 
 | 参数 | 说明 |
 | --- | --- |
+| `-C, --category` | **只检测指定分类**（可重复）：`xai` / `google`。不指定则用 `.env` 的 `CATEGORIES`，都没有则全部分类 |
+| `--list-categories` | 列出所有分类后退出 |
 | `-i, --input` | 节点文件，默认 `proxiers.txt` |
 | `-o, --output` | 结果 JSON，默认 `results.json` |
 | `--pool` | 代理池输出，默认 `proxiers_google.txt` |
@@ -183,6 +190,25 @@ uv run python tests\test_import.py
 | `--only-usable` | 代理池只写综合可用节点 |
 | `--clean-configs` | 结束后清理临时配置 |
 | `-q, --quiet` | 精简输出 |
+
+**分类输出文件**：单分类检测时，结果与代理池会带上分类后缀，互不覆盖：
+
+```powershell
+# 只测 XAI（Grok）-> results_xai.json / proxiers_xai.txt
+uv run proxy-tester -C xai
+
+# 只测 GOOGLE -> results_google.json / proxiers_google.txt
+uv run proxy-tester -C google
+
+# 一次跑多个分类 (各写各的文件)
+uv run proxy-tester -C xai -C google
+
+# 看有哪些分类
+uv run proxy-tester --list-categories
+```
+
+> **不会覆盖主 `results.json`**：分类模式只写 `results_<分类>.json`，
+> 避免一次 `-C xai --limit 5` 的试跑把之前全量的 Google 结果冲掉。
 
 常用示例：
 
@@ -645,6 +671,48 @@ Web 面板中对应 **风险** 列（`代理/VPN` / `可疑` / `正常`）与 **
 
 ---
 
+## 8.7 Cloudflare 判别：403 不等于不可用
+
+这是 XAI（Grok）分类的核心判据。**只看状态码会错判两类完全相反的情况**：
+
+| 响应 | 含义 | 判定 |
+| --- | --- | --- |
+| 403 + **CF 封禁页** | WAF 认定该出口是恶意流量，直接拒绝。真实浏览器同样进不去 | **不可用**（blocked） |
+| 403 + **CF 盾/人机验证** | 只是要求验证真人（JS 挑战 / Turnstile）。浏览器会自动通过 | **可用**（available） |
+
+判据特征（`core/cfclass.py`）：
+
+```
+封禁页独有:  cf-error-details / block_headline / "Sorry, you have been blocked"
+             / "You are unable to access <site>"
+盾/验证:     /cdn-cgi/challenge-platform/ / cf_chl_opt / turnstile
+             / "Just a moment..." / "Verify you are human"
+```
+
+实测样本见 `tests/fixtures/cf_block_grok.html`（grok.com 被 CF 封禁的真实响应，
+已脱敏 —— 保留全部判定特征，仅替换出口 IP 与 Ray ID）。
+
+> **一个坑**：`Attention Required! | Cloudflare` 是 CF 的**通用错误页标题**，
+> 封禁页与挑战页都会出现，**不能**拿它当封禁特征 —— 否则会把"盾"误判成"封禁"。
+
+分类结果里会附带 `cf_kind` 与 `cf_ray`，便于复查：
+
+```json
+{
+  "categories": {
+    "xai": {
+      "verdict": "blocked",
+      "reason": "Cloudflare 封禁该出口 (Cloudflare 拦截页 (特征: cf-error-details), Ray a49c9fb2...)",
+      "services": {"grok": "blocked"},
+      "detail": {"cf_kind": "cf_blocked", "cf_ray": "a49c9fb26c2bf1aa",
+                 "blocked_host": "grok.com", "http_status": 403}
+    }
+  }
+}
+```
+
+---
+
 ## 9. 项目结构
 
 ```
@@ -655,6 +723,11 @@ proxy-tester/
 │   ├── config_gen.py        # 生成 sing-box / xray 配置
 │   ├── launcher.py          # 进程与端口生命周期管理
 │   ├── detector.py          # 出口 IP / 地区 / 服务可用性 / 风险重定向检测
+│   ├── cfclass.py           # Cloudflare 响应分类（封禁页 vs 盾）
+│   ├── categories/          # 分类体检框架
+│   │   ├── base.py          #   基类 + 注册表（加新分类只需继承并注册）
+│   │   ├── google.py        #   GOOGLE: google / gemini / antigravity
+│   │   └── xai.py           #   XAI: grok（含 CF 判别）
 │   ├── tester.py            # 单节点流水线、并发调度与取消
 │   ├── retest.py            # 网页端「重新检测」作业管理、节点导入与合并写回
 │   ├── store.py             # 结果读取/筛选/排序/导出（CLI 与 Web 共用）

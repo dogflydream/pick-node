@@ -439,9 +439,12 @@ class Detector:
             det.google_status = pr.status
             det.google_final_url = pr.final_url
             # 端到端耗时 (含 body, 兼容旧口径)
-            det.latency = pr.elapsed_ms if pr.elapsed_ms else det.latency
-            # 首字节时间: 不含 body 下载, 更能反映"打开 Google 要等多久"
-            det.ttfb_ms = pr.ttfb_ms
+            # 注意: 只在请求【成功】时记录耗时 —— 失败(尤其超时)的 elapsed 等于
+            # 超时时长(可达数百秒), 那不是"延迟"而是"等待超时", 记录它会让
+            # 统计出现 302004ms 这种荒谬值 (实测踩到过).
+            if pr.ok and pr.elapsed_ms:
+                det.latency = pr.elapsed_ms
+                det.ttfb_ms = pr.ttfb_ms
 
             if not pr.ok:
                 det.google = "fail"

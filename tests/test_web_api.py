@@ -73,9 +73,20 @@ check("按地区筛选", jp["total"] == s["countries"].get("JP", 0), f"JP={jp['t
 
 uo = c.get("/api/nodes", params={"usable_only": True}).json()
 check("usable_only", uo["total"] == s["usable"], f"{uo['total']} vs {s['usable']}")
-check("usable_only 项都满足条件",
-      all(i["reachable"] and i["google"] == "success"
-          and i["gemini"] in ("available", "likely") for i in uo["items"]))
+# 可用性的判定规则: 分类结果以分类结论为准, 非分类结果走 Google 规则.
+# 两种情况都必须"链路可达".
+def _usable_ok(i):
+    if not i.get("reachable"):
+        return False
+    cats = i.get("categories") or {}
+    if cats:
+        return all(str((v or {}).get("verdict", "")) == "available"
+                   for v in cats.values())
+    return (i.get("google") == "success"
+            and i.get("gemini") in ("available", "likely")
+            and str(i.get("risk_level", "none")) != "high")
+
+check("usable_only 项都满足条件", all(_usable_ok(i) for i in uo["items"]))
 
 lat = c.get("/api/nodes", params={"sort": "latency"}).json()["items"]
 lats = [i["latency"] for i in lat if i.get("reachable") and i.get("latency")]

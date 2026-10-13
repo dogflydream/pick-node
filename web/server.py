@@ -104,28 +104,152 @@ retest = RetestManager(
 _BASE_RESULTS = ROOT / _env("RESULTS_FILE", "results.json")
 _stores: dict[str, ResultStore] = {}
 
+# "全部" 视图: 把所有分类结果按 node_id 合并后的只读仓库
+ALL_KEY = "all"
 
-def store_for(category: str = "") -> ResultStore:
-    """取某分类的结果仓库; category 为空则用默认 (results.json)."""
+
+class _MultiStore:
+    """把多个结果文件合并成一个视图.
+
+    用途: 默认 (未选具体分类) 时展示"所有分类的并集", 而不是某个可能过期的
+    主文件. 同 node_id 时, 后合并的 categories 会并到已有记录上.
+    """
+
+    def __init__(self, paths: list[Path]):
+        self._paths = [p for p in paths]
+        self.path = self._paths[0] if self._paths else _BASE_RESULTS
+        self._lock = __import__("threading").RLock()
+        self._rows: list[dict[str, Any]] = []
+        self._error = ""
+        self._mtime = 0.0
+        self.load()
+
+    def load(self) -> None:
+        merged: dict[str, dict[str, Any]] = {}
+        errors = []
+        newest = 0.0
+        for p in self._paths:
+            if not p.is_file():
+                continue
+            try:
+                raw = json.loads(p.read_text(encoding="utf-8", errors="replace"))
+                newest = max(newest, p.stat().st_mtime)
+            except (json.JSONDecodeError, OSError) as e:
+                errors.append(f"{p.name}: {e}")
+                continue
+            if not isinstance(raw, list):
+                continue
+            for r in raw:
+                if not isinstance(r, dict):
+                    continue
+                nid = str(r.get("node_id", "")) or str(r.get("node", ""))
+                cur = merged.get(nid)
+                if cur is None:
+                    merged[nid] = dict(r)
+                    continue
+                # 合并 categories (逐分类累积)
+                cats = dict(cur.get("categories") or {})
+                cats.update(r.get("categories") or {})
+                cur["categories"] = cats
+                # 补齐缺失的字段 (不覆盖已有非空值)
+                for k, v in r.items():
+                    if k == "categories":
+                        continue
+                    if not cur.get(k) and v:
+                        cur[k] = v
+        with self._lock:
+            self._rows = list(merged.values())
+            self._mtime = newest
+            self._error = "; ".join(errors)
+
+    def reload_if_changed(self) -> bool:
+        newest = 0.0
+        for p in self._paths:
+            try:
+                newest = max(newest, p.stat().st_mtime)
+            except OSError:
+                continue
+        if newest != self._mtime:
+            self.load()
+            return True
+        return False
+
+    @property
+    def error(self) -> str:
+        return self._error
+
+    def all(self) -> list[dict[str, Any]]:
+        with self._lock:
+            return list(self._rows)
+
+    # ---- 复用 ResultStore 的筛选/汇总/导出实现 (它们只依赖 all()) ----
+    # 用 __getattr__ 把其它方法/属性 (含 _category_stats 这类内部辅助) 全部
+    # 委托给 ResultStore, 避免"漏了一个方法就 500"的问题.
+    def __getattr__(self, name: str) -> Any:
+        attr = getattr(ResultStore, name, None)
+        if attr is None:
+            raise AttributeError(name)
+        return attr.__get__(self, type(self))
+
+    def query(self, **kw: Any) -> list[dict[str, Any]]:
+        return ResultStore.query(self, **kw)
+
+    def summary(self) -> dict[str, Any]:
+        return ResultStore.summary(self)
+
+    def facets(self) -> dict[str, Any]:
+        return ResultStore.facets(self)
+
+    def export_uris(self, scope: str = "usable",
+                    ids: Any = None) -> list[str]:
+        return ResultStore.export_uris(self, scope, ids)
+
+
+def store_for(category: str = "") -> Any:
+    """取某分类的结果仓库.
+
+    category 为空或 "all" => 返回所有分类合并后的视图 (默认展示"全部").
+    这样可以避免"默认读某个可能过期的 results.json"造成的困惑.
+    """
     key = (category or "").strip().lower()
     if key not in _stores:
-        if key:
-            p = _BASE_RESULTS.with_name(f"results_{key}.json")
+        if key and key != ALL_KEY:
+            _stores[key] = ResultStore(_BASE_RESULTS.with_name(f"results_{key}.json"))
         else:
-            p = _BASE_RESULTS
-        _stores[key] = ResultStore(p)
+            # 全部视图: 主文件 + 各分类文件
+            from core.categories import all_categories as _all
+            paths = [_BASE_RESULTS]
+            paths += [_BASE_RESULTS.with_name(f"results_{k}.json")
+                      for k in _all()]
+            exist = [p for p in paths if p.is_file()]
+            _stores[key] = _MultiStore(exist or [_BASE_RESULTS])
     return _stores[key]
 
 
-# 兼容旧调用点: 默认仓库
+# 兼容旧调用点: 默认仓库 (全部视图)
 store = store_for("")
 
 
 def available_categories() -> list[dict[str, Any]]:
-    """列出分类及其结果文件是否存在, 供前端显示可切换的页签."""
+    """列出分类及其结果文件是否存在, 供前端显示可切换的页签.
+
+    首个是 "全部" (各分类合并视图), 其后是各具体分类.
+    """
     from core.categories import all_categories
 
     out: list[dict[str, Any]] = []
+
+    # 全部 (合并视图)
+    merged = store_for(ALL_KEY)
+    mrows = merged.all()
+    out.append({
+        "key": ALL_KEY,
+        "label": "全部",
+        "file": "results*.json",
+        "exists": bool(mrows),
+        "count": len(mrows),
+    })
+
     labels = all_categories()
     for key, label in labels.items():
         st = store_for(key)
@@ -203,8 +327,8 @@ def api_nodes(
         cat_verdict="", usable_only=usable_only,
         sort=sort, order=order,
     )
-    # 分类结论筛选在第 1 个参数上做 (store 已按 category 过滤数据源)
-    if cat_verdict:
+    # 分类结论筛选 (仅具体分类有意义; "全部" 视图下用 categories 里任一的结论)
+    if cat_verdict and category and category != ALL_KEY:
         from core.store import category_verdict as _cv
         rows = [r for r in rows if _cv(r, category) == cat_verdict]
     total = len(rows)

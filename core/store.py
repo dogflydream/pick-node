@@ -31,9 +31,13 @@ def is_potentially_usable(row: dict[str, Any]) -> bool:
     若该条结果带有【分类体检】结论 (categories 字段非空), 则以分类结论为准 ——
     因为分类模式下后端只做了该分类的体检, Google 维度的字段可能没测 (全默认值),
     用旧的 Google 规则会判成不可用.
+    但【链路可达】仍是必要条件: 连不上节点的, 分类结论也不该被采信.
     """
     cats = row.get("categories") or {}
     if isinstance(cats, dict) and cats:
+        # 链路不可达 => 一律不可用 (分类探测可能也一并失败)
+        if not row.get("reachable"):
+            return False
         verds = [str((v or {}).get("verdict", "")) for v in cats.values()]
         return bool(verds) and all(v == "available" for v in verds)
 

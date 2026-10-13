@@ -59,6 +59,18 @@ for key in ("xai", "google"):
     except Exception as e:
         check(f"{key} meta 可访问", False, str(e))
 
+# "全部" 是各分类的合并视图, 不应该等于某个具体分类的数据
+try:
+    mall = c.get("/api/meta", params={"category": "all"}).json()
+    mg = c.get("/api/meta", params={"category": "google"}).json()
+    mx = c.get("/api/meta", params={"category": "xai"}).json()
+    print(f"  all    : count={mall.get('count')} (google={mg.get('count')}, xai={mx.get('count')})")
+    check("全部视图节点数 >= 任一具体分类",
+          mall.get("count", 0) >= max(mg.get("count", 0), mx.get("count", 0)),
+          f"{mall.get('count')} vs {mg.get('count')}/{mx.get('count')}")
+except Exception as e:
+    check("all 视图", False, str(e))
+
 print()
 print("=" * 92)
 print("3. 分类结果结构 (services / verdict / reason)")

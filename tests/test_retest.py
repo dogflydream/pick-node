@@ -133,7 +133,17 @@ print("5. 代理池同步")
 print("=" * 92)
 pool = (ROOT / "proxiers_google.txt").read_text(encoding="utf-8")
 lines = [x for x in pool.strip().split("\n") if x.strip()]
-check("代理池已重新生成", len(lines) > 0, f"{len(lines)} 条")
+# 池子内容应与"当前结果里判定可用"的节点一致 —— 数量可以为 0
+# (重测的节点可能都不可用), 那不算失败.
+from core.store import ResultStore, is_potentially_usable  # noqa: E402
+
+_pool_store = ResultStore(ROOT / "results_google.json")
+_expect = [str(r.get("node", "")).strip()
+           for r in _pool_store.all()
+           if is_potentially_usable(r) and str(r.get("node", "")).strip()]
+check("代理池与可用集合一致",
+      set(lines) == set(_expect),
+      f"池 {len(lines)} 条 vs 可用 {len(_expect)} 条")
 check("代理池均为合法 URI",
       all(x.startswith(("vless://", "vmess://", "trojan://", "ss://",
                         "hysteria2://", "hy2://", "tuic://")) for x in lines))

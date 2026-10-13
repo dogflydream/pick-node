@@ -83,12 +83,17 @@ class GoogleCategory(Category):
         Service("antigravity", "Antigravity", GEMINI_APP_URL, _judge_antigravity),
     )
 
+    # 外部可注入已知地区 (例如 detector 已经探过 trace), 避免重复探测;
+    # 更重要的是: trace 偶发失败时, 仍能用已知地区做黑名单判定 ——
+    # 否则 HK/MO 会被当成"地区未知"从而漏掉 Antigravity 的地区限制.
+    def set_known_country(self, cc: str) -> None:
+        self._known_cc = (cc or "").upper()
+
     def probe(self, proxy_url: str) -> CategoryResult:
         res = CategoryResult(category=self.key)
-        cc = ""
+        cc = getattr(self, "_known_cc", "") or ""
 
-        with self.client(proxy_url) as c:
-            # 1) google.com —— 可达性 + 重定向风险 (核心判据)
+        with self.client(proxy_url) as c:            # 1) google.com —— 可达性 + 重定向风险 (核心判据)
             g = self.fetch(c, GOOGLE_URL)
             final = (g["final_url"] or "").lower()
             flags = [k for k in _RISK_KEYWORDS if k in final]
@@ -127,6 +132,12 @@ class GoogleCategory(Category):
                 res.detail["ip"] = kv.get("ip", "")
                 cc = (kv.get("loc", "") or "").upper()
                 res.detail["country"] = cc
+            if not cc:
+                # trace 失败时地区未知. 这种情况不能把 HK/MO 当成"支持" ——
+                # 实测踩过: 地区为空导致 region_status("") 不命中黑名单,
+                # 于是 HK 节点的 Antigravity 被误判为可用.
+                # 保守起见: 地区未知时, 记下标记, 由下游按"地区未知"处理.
+                res.detail["country_unknown"] = True
 
             # 3) Gemini 网页版
             m = self.fetch(c, GEMINI_URL)
@@ -142,6 +153,15 @@ class GoogleCategory(Category):
             # 风险重定向否决
             if hk_redirect and mv in ("available", "likely"):
                 mv, mr = "blocked", f"风险重定向: {gr}"
+            # Google 未通过时, Gemini 不得判为可用 (硬规则, 与旧 detector 一致).
+            # 否则会出现 "google=fail 而 gemini=available" 的自相矛盾结果 ——
+            # 实测这种多半是单次请求抖动: google 那次失败了, gemini 那次恰好成功,
+            # 不能据此认为该节点可用.
+            if gv != "available" and mv in ("available", "likely"):
+                prev = mv
+                mv = "unavailable"
+                mr = (f"Google 未通过 ({gr[:40]}) —— 按'两者都 OK 才算可用'降级"
+                      f" (原判定 {prev})")
             res.services["gemini"] = mv
             res.reasons["gemini"] = mr
 

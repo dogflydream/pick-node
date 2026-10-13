@@ -1,4 +1,8 @@
-"""结果仓库测试: 筛选/排序/导出规则."""
+"""结果仓库测试: 筛选/排序/导出规则.
+
+数据源选择: 优先用 results_google.json (全量 132 节点, 字段最全),
+否则回退 results.json. 这样测试不依赖"当前主文件恰好是哪次跑的结果".
+"""
 import sys
 from pathlib import Path
 
@@ -9,7 +13,11 @@ from core.util import setup_console
 
 setup_console()
 
-store = ResultStore(ROOT / "results.json")
+# 挑一个字段最全的数据文件
+_candidates = [ROOT / "results_google.json", ROOT / "results.json"]
+_data = next((p for p in _candidates if p.is_file()
+              and len(ResultStore(p).all()) > 10), _candidates[-1])
+store = ResultStore(_data)
 print(f"载入: {store.path.name}  错误={store.error!r}")
 
 rows = store.all()

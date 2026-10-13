@@ -424,6 +424,12 @@ class RetestManager:
 
         单分类检测写 results_<cat>.json 与 proxiers_<cat>.txt,
         避免测 XAI 时覆盖 GOOGLE 的结果 (与 CLI 行为一致).
+
+        未指定分类 (网页端"全部"视图下重测) 时:
+          - 结果写主 results.json (作为总览)
+          - 但【代理池】不能按主文件算 —— 主文件可能只有少数节点,
+            会把之前全量算出的池覆盖成空. 因此池由"各分类文件合并后的
+            可用集合"重建 (见 _write_pool).
         """
         if len(self._categories) == 1:
             cat = self._categories[0]
@@ -432,28 +438,76 @@ class RetestManager:
             return rf, pf
         return self.results_file, self.pool_file
 
+    def _pool_usable(self, results: list[NodeResult],
+                     target_results: Path) -> list[str]:
+        """计算应写入代理池的 URI 列表.
+
+        - 单分类: 基于该分类的结果文件
+        - 未指定分类: 基于【所有结果文件的并集】, 避免局部重测把池覆盖成空
+        """
+        from .store import is_potentially_usable
+
+        def uris_from(rows: list[dict]) -> list[str]:
+            out = []
+            for r in rows:
+                u = str(r.get("node", "")).strip()
+                if u and is_potentially_usable(r):
+                    out.append(u)
+            return out
+
+        if len(self._categories) == 1:
+            payload = self._read_json(target_results)
+            return uris_from(payload)
+
+        # 未指定分类: 合并 主文件 + 各分类文件
+        from .categories import REGISTRY
+        paths = [self.results_file]
+        paths += [self.results_file.with_name(f"results_{k}.json")
+                  for k in REGISTRY]
+        seen: list[str] = []
+        known: set[str] = set()
+        for p in paths:
+            for u in uris_from(self._read_json(p)):
+                if u not in known:
+                    known.add(u)
+                    seen.append(u)
+        return seen
+
+    @staticmethod
+    def _read_json(path: Path) -> list[dict]:
+        if not path.is_file():
+            return []
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+        except (json.JSONDecodeError, OSError):
+            return []
+        return [r for r in raw if isinstance(r, dict)] if isinstance(raw, list) else []
+
     def _merge_and_write(self, results: list[NodeResult]) -> tuple[list[dict], int]:
         """把本次结果合并进结果文件, 返回 (全部条目, 本次更新数).
 
         合并规则: 以 node_id 为键, 本次测到的覆盖旧的; 其余节点原样保留.
         这样"只重测勾选的几个节点"不会把其它节点的历史结果冲掉.
-
-        分两步: 先写分类专属文件 (本次真实测到的), 再回写主结果文件
-        (把分类结论合并进主文件, 保持一份总览可用).
         """
         target_results, target_pool = self._target_files()
         payload = self._merge_into(target_results, results, replace_only=False)
 
-        # 若写入的是分类专属文件, 再把分类结论合并回主文件 (按 node_id 更新 categories 字段)
+        # 若写入的是分类专属文件, 再把分类结论合并回主文件
+        # (按 node_id 更新 categories 字段, 保持主文件是总览)
         if target_results != self.results_file:
             self._merge_categories_into_main(results)
 
-        # 代理池与 CLI 保持一致: 只写潜在可用
-        # 注意: payload 里已经是 dict (NodeResult.to_dict 的结果), 不能再调 to_dict()
-        from .store import is_potentially_usable
-        usable = [str(r.get("node", "")).strip() for r in payload
-                  if is_potentially_usable(r) and str(r.get("node", "")).strip()]
-        write_text_nobom(target_pool,
+        # ---- 代理池 ----
+        # 池内文件与"结果文件"配套, 且未指定分类时按并集重建,
+        # 避免局部重测把全量池覆盖成空 (实测踩过)。
+        pool_path = target_pool
+        name = target_results.name
+        if name.startswith("results_") and name.endswith(".json"):
+            cat = name[len("results_"):-len(".json")]
+            pool_path = target_pool.with_name(f"proxiers_{cat}.txt")
+
+        usable = self._pool_usable(results, target_results)
+        write_text_nobom(pool_path,
                          "\n".join(usable) + ("\n" if usable else ""))
 
         return payload, len(results)
