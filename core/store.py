@@ -20,8 +20,8 @@ GEMINI_ORDER = {"available": 0, "likely": 1, "unknown": 2, "blocked": 3, "unavai
 #   1) 链路可达 (拿得到出口 IP)
 #   2) Google 可访问
 #   3) Gemini 没有被明确拒绝 (blocked / unavailable 都排除)
-#      注意 available 与 likely 都算潜在可用: likely 只是"地区不在已知白名单",
-#      并不代表不可用, 用户要求把潜在可用的都导出.
+#      注: 当前版本已不再产生 "likely" 值 (地区改为黑名单制), 但保留它
+#          是为了兼容早期生成的 results.json, 旧数据里 likely 代表可用.
 USABLE_GEMINI = ("available", "likely")
 
 

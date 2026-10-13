@@ -257,12 +257,13 @@ ss://base64methodpass@example.com:8388#节点名
 
 1. 链路可达（拿到了出口 IP）
 2. Google 访问成功
-3. **未命中风险重定向**（`risk_level != "high"`，即没被 Google 判定为代理/VPN 出口）
-4. Gemini 未被明确拒绝（`available` 或 `likely`；`blocked` / `unavailable` 排除）
+3. **出口地区不在不支持名单**（HK / CN / MO / RU …）
+4. **未命中风险重定向**（`risk_level != "high"`，即没被 Google 判定为代理/VPN 出口）
+5. Gemini 判为 `available`
 
-> 说明：`likely` 表示「出口地区不在已知白名单，但页面可达」，仍算潜在可用，
-> 所以会被导出。如果你只想要最稳妥的那批，用 CLI 的 `--only-usable`
-> （对应严格判定）。
+> 说明：本版本判定收敛为「可用 / 不可用」两档，不再有中间态
+> （早期版本的 `likely` 是因为地区白名单是主观枚举，已废弃）。
+> 如果你只想要最稳妥的那批，用 CLI 的 `--only-usable`。
 
 ### 5.4 在网页端导入新节点
 
@@ -409,7 +410,7 @@ CHECK_ANTIGRAVITY=true
     "google_status": 200,
     "google_final_url": "https://www.google.com.hk/",
     "gemini": "available",
-    "gemini_reason": "出口地区 SG (支持列表), 页面可达",
+    "gemini_reason": "出口地区 SG (不在不支持名单), 页面可达",
     "antigravity": "available",
     "antigravity_reason": "跟随 Gemini (Google 与 Gemini 均可用)",
     "rtt_min_ms": 199,
@@ -436,7 +437,7 @@ CHECK_ANTIGRAVITY=true
 | `risk_level` | `high` / `low` / `none` —— 是否被 Google 判定为代理/VPN 出口 |
 | `risk_flags` | 命中的风险关键词，如 `["hkredirect","com.hk"]` |
 | `hk_redirect` | 是否命中 `pref=hkredirect` 本地化跳转 |
-| `gemini` | `available` / `likely` / `blocked` / `unavailable` |
+| `gemini` | `available` / `blocked` / `unavailable` |
 | `antigravity` | 与 `gemini` 始终一致（跟随 Gemini） |
 | `rtt_min_ms` | **链路往返（小请求连测取最小值）—— 推荐用这个比快慢** |
 | `rtt_samples` | RTT 的原始采样，便于判断稳定性 |
@@ -496,26 +497,69 @@ CHECK_ANTIGRAVITY=true
 页面内没有国家码、也没有 "not available in your country" 文案 ——
 Gemini 真正的门禁在浏览器端 / 登录后 API 层，从页面本身看不出差别。
 
-### 8.3 Gemini / Antigravity 判定分层
+### 8.3 地区名单：只维护「不支持」的黑名单
+
+支持列表覆盖 200+ 地区，枚举既冗长又容易过时，因此本工具**只记录不支持的地区**：
+
+| 代码 | 地区 | 说明 |
+| --- | --- | --- |
+| `CN` | 中国大陆 | 网页版仅 Workspace 支持；API / AI Studio 不支持 |
+| `RU` | 俄罗斯 | 三份名单共同不支持 |
+| `IR` | 伊朗 | 同上 |
+| `BY` | 白俄罗斯 | 同上 |
+| `KP` | 朝鲜 | 同上 |
+| `SY` | 叙利亚 | 同上 |
+| `CU` | 古巴 | 同上 |
+| `HK` | 香港 | **网页版支持，但 API / AI Studio 与 Antigravity 不支持** |
+| `MO` | 澳门 | 同上 |
+
+数据来源（Google 官方文档）：
+
+- Gemini 网页版支持地区：<https://support.google.com/gemini/answer/13575153>
+- Gemini API / AI Studio：<https://ai.google.dev/gemini-api/docs/available-regions>
+- Antigravity FAQ：<https://antigravity.google/docs/faq/>
+
+**关于 HK / MO 的取舍**：Gemini **网页版**是支持香港、澳门的，但 **API / AI Studio**
+与 **Antigravity** 都不支持。本工具面向的是「能否用于 Google AI 服务（含 API 与
+Antigravity）」，所以把 HK / MO 列入不支持 —— 这也与你实测一致：访问
+`www.google.com` 被重定向到 `com.hk` 的节点，实际不可用。
+
+> 名单会随 Google 政策变动，以上为 2026-10 核对结果，**请以官方页面为准**。
+> 需要调整时改 `core/detector.py` 里的 `_UNSUPPORTED_REGIONS` 即可。
+
+**两个判据的关系**：地区黑名单与 §8.2 的重定向判据是**独立的两道闸**：
+
+- 地区在黑名单 → 直接 `blocked`（例如 HK 出口 20 个，全部拦下）
+- 地区不在黑名单，但访问 google.com 被重定向到 `com.hk` → 同样 `blocked`
+  （例如出口在 JP / US / SG 却跳转的 30 个节点）
+
+任一条命中即不可用；两条都不命中才判 `available`。
+
+### 8.4 Gemini / Antigravity 判定分层
 
 | 判定 | 含义 |
 | --- | --- |
-| `blocked` | 命中明确反面信号：**跳转到 `com.hk`**、`gemini/app` 被送到 `/sorry/`、HTTP 429 |
-| `available` | 未命中上述信号，Google 与 Gemini 均可达，且出口地区在支持列表 |
-| `likely` | 未命中反面信号，但出口地区不在已知列表 —— **建议登录实测** |
+| `blocked` | 命中明确反面信号：**出口地区在不支持名单**（HK / CN / MO / RU …）、**访问 google.com 被重定向到 `com.hk`**、`gemini/app` 被送到 `/sorry/`、HTTP 429 |
+| `available` | 未命中任何反面信号，Google 与 Gemini 均可达 |
 | `unavailable` | 请求层面就失败（超时 / TLS 错误 / 连接被拒），或 Google 未通过 |
 
-> **建议**：把 `available` 当作可靠候选，把 `likely` 当作待验证候选。
-> 最终能否使用 Gemini，仍取决于账号与登录状态，建议对筛选结果做一次人工复测。
+> **说明**：本版本已不再产生 `likely`。早先它表示「地区不在我的白名单里」，
+> 而那份白名单是我的主观枚举、并无官方依据，容易误导，现已改为按官方
+> 黑名单判定。读取早期生成的 `results.json` 时，历史 `likely` 仍按可用处理。
 
 **判定链条（本版本）**：
 
 ```
 Google 可达 ─┐
-Gemini 可达 ─┼─►  都 OK  ──►  未被重定向到 com.hk  ──►  Gemini 可用  ──►  Antigravity 跟随
+Gemini 可达 ─┼─►  都 OK  ──►  地区不在黑名单  ──┐
+            │                                  ├─►  Gemini 可用  ─►  Antigravity 跟随
+            │            未被重定向到 com.hk  ──┘
             │
-   风险重定向 ─┴─►  命中即否决（即使上面都 OK）
+            └─►  命中任一否决信号  ──►  不可用
 ```
+
+> 最终能否使用 Gemini，仍取决于账号关联的国家与登录状态（Antigravity 尤其
+> 依赖**账号国家**而非当前 IP）。建议对筛选结果做一次人工复测。
 
 **Antigravity 不做独立探测，直接跟随 Google + Gemini 的结论。**
 原因是上一版本独立请求 `antigravity.google` 的误判率很高（实测抽检 6 个判死的
@@ -526,7 +570,7 @@ Gemini 可达 ─┼─►  都 OK  ──►  未被重定向到 com.hk  ──
 
 **硬性不变式**（有单元测试守着，见 `tests/test_verdicts.py`）：
 
-- Google 未通过时，Gemini 一律不得判为 `available` / `likely`
+- Google 未通过时，Gemini 一律不得判为 `available`
 - Antigravity 必须与 Gemini 结论完全一致
 - 跳转到 `com.hk` 的节点必须被排除，无论其出口在哪个地区
 - **出口地区本身不构成否决条件**（HK / CN 出口只要不跳转，仍可判可用）
@@ -554,8 +598,8 @@ Gemini 可达 ─┼─►  都 OK  ──►  未被重定向到 com.hk  ──
 
 ### 8.5 风险标记（代理/VPN 检测）
 
-Google 会把「机场/代理出口」识别出来并降级处理。这类节点**即使出口在支持地区、
-页面也返回 200，Gemini 与 Antigravity 实际仍不可用**。
+Google 会把「机场/代理出口」识别出来并降级处理。这类节点**即使出口不在黑名单
+地区、页面也返回 200，Gemini 与 Antigravity 实际仍不可用**。
 
 识别信号按优先级：
 
@@ -579,6 +623,10 @@ Google 会把「机场/代理出口」识别出来并降级处理。这类节点
   "risk_reason": "访问 www.google.com 被重定向到 www.google.com.hk —— 该出口确定不可用"
 }
 ```
+
+> **与地区黑名单的区别**：黑名单管的是「这个地区官方就不支持」，
+> 风险标记管的是「地区没问题，但这个出口被 Google 识别成代理了」。
+> 实测后者会命中 JP / US / SG 等正常地区的节点，是两套互补的判据。
 
 Web 面板中对应 **风险** 列（`代理/VPN` / `可疑` / `正常`）与 **风险** 筛选器。
 
@@ -728,23 +776,27 @@ Hysteria2 节点）。
 
 ```
 总节点        : 132
-综合可用      : 63
-Google 可达   : 103
-Gemini 可用   : 40  (可能可用 23)
-Antigravity   : 40  (跟随 Gemini)
-高风险(代理/VPN): 35
-链路 RTT      : 平均 362 ms   最快 96 ms      <- 推荐比较口径
-Google 首字节 : 平均 2314 ms   最快 370 ms
-Google 端到端 : 平均 2902 ms   最快 370 ms   (含下载首页)
-出口地区分布  : HK:24, JP:23, US:21, SG:10, TH:7, NL:4, DE:2, KR:2, CA:2, ...
-总耗时        : 183.8 s
+综合可用      : 43
+Google 可达   : 102
+Gemini 可用   : 43
+Antigravity   : 43  (跟随 Gemini)
+高风险(代理/VPN): 32
+链路 RTT      : 平均 317 ms   最快 97 ms      <- 推荐比较口径
+Google 首字节 : 平均 2140 ms   最快 559 ms
+Google 端到端 : 平均 2776 ms   最快 718 ms   (含下载首页)
+出口地区分布  : JP:24, HK:23, US:21, SG:10, TH:8, NL:4, VN:3, KR:3, ...
+总耗时        : 159.4 s
 ```
 
 > **可用数是浮动的**：节点池里的共享出口会随订阅状态、时段、限流而变化。
 > 同一批节点在不同时间跑，可用数可能有明显差异。
 > 排查时先看错误类型：如果是大量 `SOCKS/代理连接失败` 或 `TLS 断开`，
 > 多半是节点侧问题，可以先在裸 TCP 层验证（DNS 能解析但端口连不上）。
->
-> **判定只看"是否跳转 com.hk"，不看出口地区**：HK 出口只要不跳转就仍算可用
-> （实测 24 个 HK 节点里 18 个可用）。被排除的是 `risk_level=high` 的节点，
-> 它们分布在 HK / SG / JP / US / VN / GB 各地。
+
+结果解读（132 个节点）：
+
+- `available` **43** 个 —— 地区不在黑名单，且未被识别为代理出口
+- `blocked` **50** 个 —— 其中 20 个是 HK 出口（地区不支持），
+  其余 30 个是访问 google.com 被重定向到 `com.hk` 的节点
+  （出口分布在 JP 11 / US 10 / SG 6 / GB 1 / VN 1 / MO 1）
+- `unavailable` **39** 个 —— 连接失败、超时、TLS 断开等节点侧问题

@@ -59,25 +59,59 @@ _TLD_TO_COUNTRY = {
     "ru": "RU", "in": "IN", "com.mx": "MX", "it": "IT", "nl": "NL",
 }
 
-# 注意: 本工具【不再按出口地区封锁】判定不可用.
+# ---------------------------------------------------------------- 不支持地区 (黑名单)
 #
-# 早先版本把 HK / CN 等地区直接判为 blocked, 但实测证伪了这条规则:
-#   - 24 个 HK 出口节点里, 只有 3 个会被重定向到 google.com.hk;
-#     其余 21 个访问 www.google.com 仍停在 www.google.com.
-#   - 反过来, 32 个"跳转到 com.hk"的节点出口根本不在 HK
-#     (JP 11 / US 12 / SG 7 / GB 1 / VN 1).
-# 也就是说"出口地区"与"是否被 Google 重定向"是两件独立的事,
-# 而真正决定可用性的是后者 (见 _analyze_risk).
+# 只维护【不支持】的地区. 支持列表覆盖 200+ 地区, 枚举既冗长又容易过时,
+# 因此采用黑名单: 命中则降级, 未命中按正常流程判定.
 #
-# 保留地区白名单仅用于输出"likely/available"的措辞参考, 不参与否决.
-
-# 这些地区通常可以使用 Gemini / Antigravity (仅作措辞参考)
-_GEMINI_ALLOWED_REGIONS = {
-    "US", "JP", "SG", "TW", "KR", "GB", "DE", "FR", "CA", "AU",
-    "NL", "IT", "ES", "SE", "CH", "PL", "IN", "BR", "ID", "TH",
-    "VN", "MY", "PH", "MX", "TR", "AE", "IL", "NZ", "IE", "BE",
-    "AT", "DK", "NO", "FI", "PT", "CZ", "GR", "AR", "CL", "CO",
+# 来源 (Google 官方文档, 2026-10 核对):
+#   Gemini Web App  : https://support.google.com/gemini/answer/13575153
+#   Gemini API / AI Studio:
+#                     https://ai.google.dev/gemini-api/docs/available-regions
+#   Antigravity FAQ : https://antigravity.google/docs/faq/
+#
+# 关键差异 (决定了本工具怎么归类):
+#   - 三份名单共同不支持: CN, RU, IR, BY, KP, SY, CU + 克里米亚等制裁地区
+#   - Gemini【API / AI Studio】额外不支持: HK, MO
+#   - Antigravity 也明确不含 HK, MO
+#   - 但 Gemini【网页版】是支持 HK / MO / TW 的
+# 本工具面向的是"能否用 Google AI 服务"(含 API 与 Antigravity),
+# 因此把 HK / MO 一并列入不支持 —— 与用户实测一致:
+# 访问 www.google.com 被重定向到 com.hk 的节点, Gemini/Antigravity 实际不可用.
+#
+# 注意: 这只是【地区维度】的参考. 是否真的不可用, 主判据仍是
+# _analyze_risk 里的"是否被重定向到 com.hk"(实测二者并不等价).
+_UNSUPPORTED_REGIONS = {
+    # 三份名单共同不支持
+    "CN",  # 中国大陆 (Web App 仅 Workspace 支持; API 不支持)
+    "RU",  # 俄罗斯
+    "IR",  # 伊朗
+    "BY",  # 白俄罗斯
+    "KP",  # 朝鲜
+    "SY",  # 叙利亚
+    "CU",  # 古巴
+    # Gemini API/AI Studio 与 Antigravity 额外排除
+    "HK",  # 香港 (网页版支持, API / Antigravity 不支持)
+    "MO",  # 澳门 (同上)
 }
+
+# 便于展示: 代码 -> 中文名
+_REGION_NAMES = {
+    "CN": "中国大陆", "RU": "俄罗斯", "IR": "伊朗", "BY": "白俄罗斯",
+    "KP": "朝鲜", "SY": "叙利亚", "CU": "古巴", "HK": "香港", "MO": "澳门",
+}
+
+
+def region_status(cc: str) -> tuple[bool, str]:
+    """判断出口地区是否在 Google AI 服务的不支持名单里.
+
+    返回 (是否不支持, 说明). 未命中黑名单时返回 (False, "")。
+    """
+    cc = (cc or "").upper()
+    if cc in _UNSUPPORTED_REGIONS:
+        name = _REGION_NAMES.get(cc, cc)
+        return True, f"{name}({cc}) 不在 Gemini API / Antigravity 支持范围"
+    return False, ""
 
 _BROWSER_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -533,11 +567,14 @@ class Detector:
         因此单凭 HTTP 200 不能证明 Gemini 可用.
 
         判定策略是按证据强度分层:
-          blocked     : 命中明确的反面信号 (sorry 页 / 429 / 跳离 gemini 域)
-          available   : 出口地区在支持列表 且 页面可达  -> 高概率可用
-          likely      : 地区未知或不在已知列表, 页面可达 -> 需人工确认
-          unavailable : 请求层面就失败
+          blocked     : 命中明确反面信号 —— 地区在不支持名单(见文件头),
+                        或 /sorry/ 风控页 / 429 / 跳离 gemini 域 / 被重定向 com.hk
+          available   : 未被上述任何信号命中, 且 Google 与 Gemini 都可达
+          unavailable : 请求层面就失败, 或 Google 未通过
         并在 reason 里写明依据, 不给出无法支撑的确定性结论.
+
+        兼容说明: 历史结果里可能存在 "likely"(早期按地区白名单给的措辞),
+        现已不再产生该值, 但读取旧 results.json 时仍会被当作可用处理.
         """
         with self._client(proxy_url) as client:
             pr = self._probe(client, "gemini", "https://gemini.google.com/")
@@ -587,18 +624,18 @@ class Detector:
                     )
                 return
 
-            # 结合地区给出措辞 (仅参考, 不否决).
-            # 是否"真的不可用"由风险重定向判定, 不看地区 —— 见下方覆盖逻辑.
+            # 地区维度: 命中黑名单则判 blocked.
+            # 黑名单只列"不支持"的地区 (见文件头注释), 未命中即视为地区没问题.
             cc = (det.country or "").upper()
-            if cc in _GEMINI_ALLOWED_REGIONS:
-                det.gemini = "available"
-                det.gemini_reason = f"出口地区 {cc} (支持列表), 页面可达"
-            else:
-                det.gemini = "likely"
-                det.gemini_reason = (
-                    f"出口地区 {cc or '未知'}, 页面可达 —— "
-                    "建议登录实测确认"
-                )
+            unsupported, why = region_status(cc)
+            if unsupported:
+                det.gemini = "blocked"
+                det.gemini_reason = why
+                return
+            det.gemini = "available"
+            det.gemini_reason = (
+                f"出口地区 {cc or '未知'} (不在不支持名单), 页面可达"
+            )
 
             # ---- 风险重定向覆盖 (优先级最高, 由 detect_google 阶段判定) ----
             # 实测: 出口被 Google 判定为代理/VPN 时 (表现为 google.com 跳

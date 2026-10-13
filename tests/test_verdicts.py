@@ -115,25 +115,44 @@ check("异常后 antigravity 不为可用", det.antigravity != "available",
 
 print()
 print("=" * 92)
-print("6. 【核心】不可用看'是否跳转 com.hk', 不看出口地区")
+print("6. 地区黑名单 (只维护不支持的地区)")
 print("=" * 92)
 
-# 6a) 出口是 HK, 但没跳转 -> 不应因地区被判 blocked
+from core.detector import region_status  # noqa: E402
+
+# 6a) 官方不支持的地区 -> 命中黑名单
+for cc in ("CN", "RU", "IR", "BY", "KP", "SY", "CU", "HK", "MO"):
+    bad, why = region_status(cc)
+    check(f"{cc} 在缺省不支持名单", bad, why[:40])
+
+# 6b) 常见可用地区 -> 不命中黑名单
+for cc in ("US", "JP", "SG", "TW", "KR", "DE", "GB", "LV", "UA", "TH", "VN"):
+    bad, why = region_status(cc)
+    check(f"{cc} 不在黑名单", not bad)
+
+# 6c) 黑名单只影响地区维度, 仍可被风险判据覆盖
+#     (若某地区在名单里, detect_gemini 会直接判 blocked)
 det = Detection()
 det.google = "success"
 det.country = "HK"
-det.gemini = "available"          # detect_gemini 给的是"页面可达"
-det.risk_level = "none"           # 没有跳转 => 无风险
+det.gemini = "blocked"            # 地区在黑名单 -> blocked
+det.risk_level = "none"
+d.resolve_antigravity(det)
+check("HK(黑名单) -> Gemini blocked", det.gemini == "blocked", f"={det.gemini}")
+check("HK(黑名单) -> Antigravity 跟随 blocked",
+      det.antigravity == "blocked", f"={det.antigravity}")
+
+# 6d) 非黑名单地区 + 未跳转 -> 可用
+det = Detection()
+det.google = "success"
+det.country = "JP"
+det.gemini = "available"
+det.risk_level = "none"
 det.hk_redirect = False
 d.resolve_antigravity(det)
-check("HK 出口 + 未跳转 -> Gemini 不被地区否决",
-      det.gemini == "available", f"={det.gemini}")
-check("HK 出口 + 未跳转 -> Antigravity 跟随可用",
+check("JP 出口 + 未跳转 -> Gemini 可用", det.gemini == "available", f"={det.gemini}")
+check("JP 出口 + 未跳转 -> Antigravity 跟随可用",
       det.antigravity == "available", f"={det.antigravity}")
-check("HK 出口 + 未跳转 -> 计入潜在可用",
-      is_potentially_usable({
-          "reachable": True, "google": "success",
-          "gemini": "available", "risk_level": "none"}))
 
 # 6b) 出口不是 HK, 但跳转了 -> 必须判不可用
 det = Detection()
@@ -153,20 +172,15 @@ check("SG 出口 + 跳转 com.hk -> 不计入潜在可用",
           "reachable": True, "google": "success",
           "gemini": "blocked", "risk_level": "high"}))
 
-# 6c) 地区字段本身不再参与否决: HK 也能进可用集合
-check("地区 HK 不再是硬性否决条件",
-      is_potentially_usable({
-          "reachable": True, "google": "success",
-          "gemini": "available", "risk_level": "none", "country": "HK"}))
-
 print()
 print("=" * 92)
-print("7. 中国大陆出口同样是'看跳转不看出口'")
+print("7. 黑名单地区即使页面可达, 也不计入可用")
 print("=" * 92)
-check("CN 出口 + 未跳转 -> 仍可判可用",
-      is_potentially_usable({
-          "reachable": True, "google": "success",
-          "gemini": "available", "risk_level": "none", "country": "CN"}))
+for cc in ("CN", "HK", "MO"):
+    check(f"{cc} 出口 -> 不计入潜在可用",
+          not is_potentially_usable({
+              "reachable": True, "google": "success",
+              "gemini": "blocked", "risk_level": "none", "country": cc}))
 
 print()
 print("=" * 92)
