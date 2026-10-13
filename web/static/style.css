@@ -330,6 +330,103 @@ input[type="search"]::-webkit-search-cancel-button { filter: invert(.6); }
 .btn.is-busy svg { animation: spin 1.1s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
+/* ---------- 导入节点 ---------- */
+.panel--import { border-color: rgba(56, 189, 248, .32); }
+
+.imp__head {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: var(--space-3); margin-bottom: var(--space-3);
+}
+.imp__head .panel__title { margin: 0; }
+
+.imp__help {
+  font-size: 13px; line-height: 1.7; color: var(--color-muted-foreground);
+  margin-bottom: var(--space-3);
+}
+.imp__help strong { color: var(--color-foreground); }
+.imp__help code {
+  font-family: var(--font-mono); font-size: 12px;
+  background: rgba(148, 163, 184, .14);
+  padding: 1px 5px; border-radius: 4px;
+}
+
+.imp__drop { position: relative; }
+.imp__drop textarea {
+  width: 100%;
+  padding: var(--space-3);
+  background: rgba(15, 23, 42, .68);
+  border: 1px solid rgba(148, 163, 184, .28);
+  border-radius: var(--radius-md);
+  font-family: var(--font-mono);
+  font-size: 12.5px; line-height: 1.6;
+  resize: vertical;
+  transition: border-color var(--dur) var(--ease), background var(--dur) var(--ease);
+}
+.imp__drop textarea:focus {
+  border-color: #93C5FD;
+  background: rgba(15, 23, 42, .92);
+}
+.imp__dropmask {
+  position: absolute; inset: 0;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(56, 189, 248, .16);
+  border: 2px dashed rgba(56, 189, 248, .7);
+  border-radius: var(--radius-md);
+  font-size: 14px; font-weight: 600; color: #BAE6FD;
+  pointer-events: none;
+}
+
+/* 统计条 */
+.imp__stats {
+  display: flex; flex-wrap: wrap; gap: var(--space-4);
+  margin-top: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  background: rgba(15, 23, 42, .5);
+  border: 1px solid rgba(148, 163, 184, .18);
+  border-radius: var(--radius-md);
+  font-size: 13px;
+}
+.imp__stat { display: inline-flex; align-items: center; gap: 6px; }
+.imp__stat strong { font-family: var(--font-mono); font-size: 15px; }
+.imp__stat::before {
+  content: ""; width: 7px; height: 7px; border-radius: 50%;
+  background: currentColor; flex-shrink: 0;
+}
+.imp__stat--new { color: var(--status-ok); }
+.imp__stat--dup { color: var(--status-idle); }
+.imp__stat--bad { color: var(--status-bad); }
+
+/* 明细 (默认折叠, 新手可以不看) */
+.imp__details { margin-top: var(--space-3); }
+.imp__details summary {
+  cursor: pointer; font-size: 12.5px;
+  color: var(--color-muted-foreground);
+  padding: var(--space-1) 0;
+}
+.imp__details summary:hover { color: var(--color-foreground); }
+.imp__detail-body {
+  margin-top: var(--space-2);
+  max-height: 180px; overflow-y: auto;
+  font-family: var(--font-mono); font-size: 11.5px; line-height: 1.8;
+  color: var(--color-muted-foreground);
+  white-space: pre-wrap; word-break: break-all;
+}
+.imp__detail-body .ok { color: var(--status-ok); }
+.imp__detail-body .bad { color: var(--status-bad); }
+
+.imp__actions {
+  display: flex; align-items: center; justify-content: flex-end;
+  gap: var(--space-2); flex-wrap: wrap;
+  margin-top: var(--space-4); padding-top: var(--space-3);
+  border-top: 1px solid rgba(148, 163, 184, .14);
+}
+.imp__hint {
+  margin-right: auto; font-size: 12.5px;
+  color: var(--color-muted-foreground);
+}
+.imp__hint--ok { color: var(--status-ok); }
+.imp__hint--bad { color: var(--status-bad); }
+
 /* ---------- 重新检测: 确认条 ---------- */
 .panel--confirm { border-color: rgba(56,189,248,.35); }
 .confirm__text { font-size: 13px; margin-bottom: var(--space-3); color: var(--color-foreground); }
@@ -501,6 +598,12 @@ input[type="checkbox"] {
 .lat--fast { color: var(--status-ok); }
 .lat--mid  { color: var(--status-warn); }
 .lat--slow { color: var(--status-bad); }
+
+/* 全局: 让 hidden 属性真正生效.
+   浏览器默认的 [hidden] { display: none } 权重很低, 会被本文件里
+   带 display 的类 (如 .empty{display:flex}, .panel{...}) 覆盖,
+   导致"隐藏"的元素仍然占据空间 (实测过表格下方多出 126px 空白). */
+[hidden] { display: none !important; }
 
 /* ---------- 空态 ---------- */
 .empty {

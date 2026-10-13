@@ -392,6 +392,172 @@ async function doExport() {
   }
 }
 
+// ---------------------------------------------------------------- 导入节点
+
+/** 打开导入面板 */
+function openImport() {
+  $('import-panel').hidden = false;
+  $('import-text').focus();
+  $('import-panel').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+
+function closeImport() {
+  $('import-panel').hidden = true;
+  resetImportPreview();
+}
+
+function resetImportPreview() {
+  $('import-stats').hidden = true;
+  $('import-details').hidden = true;
+  $('import-detail-body').textContent = '';
+  $('btn-import-submit').disabled = true;
+  $('btn-import-submit').textContent = '导入';
+  $('import-hint').textContent = '粘贴后会自动检查，确认无误再点「导入」。';
+  $('import-hint').className = 'imp__hint';
+}
+
+/** 自动检查: 调后端预览, 告诉用户会新增多少 / 跳过多少 */
+async function previewImport() {
+  const text = $('import-text').value;
+  if (!text.trim()) { resetImportPreview(); return; }
+
+  try {
+    const r = await fetch('/api/nodes/preview', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text }),
+    });
+    if (!r.ok) throw new Error(r.status + ' ' + r.statusText);
+    const d = await r.json();
+    renderImportPreview(d);
+  } catch (e) {
+    $('import-hint').textContent = '检查失败：' + e.message;
+    $('import-hint').className = 'imp__hint imp__hint--bad';
+    $('btn-import-submit').disabled = true;
+  }
+}
+
+function renderImportPreview(d) {
+  $('import-stats').hidden = false;
+  $('imp-new').textContent = d.new_count || 0;
+  $('imp-dup').textContent = d.dup_count || 0;
+  $('imp-bad').textContent = d.bad_count || 0;
+
+  // 明细: 让想深究的人能看到具体是哪些行
+  const parts = [];
+  (d.new_samples || []).forEach(t => parts.push(`<span class="ok">[新增] ${esc(t)}</span>`));
+  (d.dup_samples || []).forEach(t => parts.push(`[跳过] 重复: ${esc(t)}`));
+  (d.bad_samples || []).forEach(x =>
+    parts.push(`<span class="bad">[无效] ${esc(x.error)} — ${esc(x.line)}</span>`));
+  const body = $('import-detail-body');
+  body.innerHTML = parts.length ? parts.join('\n') : '（没有明细）';
+  $('import-details').hidden = parts.length === 0;
+
+  const n = d.new_count || 0;
+  const btn = $('btn-import-submit');
+  if (n > 0) {
+    btn.disabled = false;
+    btn.textContent = `导入 ${n} 个节点`;
+    $('import-hint').textContent =
+      `准备导入 ${n} 个新节点` +
+      (d.dup_count ? `，${d.dup_count} 个已存在会自动跳过` : '') +
+      (d.bad_count ? `，${d.bad_count} 行无法识别` : '') + '。';
+    $('import-hint').className = 'imp__hint imp__hint--ok';
+  } else {
+    btn.disabled = true;
+    btn.textContent = '导入';
+    if (d.dup_count && !d.bad_count) {
+      $('import-hint').textContent =
+        `这 ${d.dup_count} 个节点都已经在列表里了，不需要重复导入。`;
+      $('import-hint').className = 'imp__hint';
+    } else if (d.bad_count) {
+      $('import-hint').textContent =
+        `没找到可识别的代理链接（${d.bad_count} 行无法解析）。请确认每行是一个完整链接。`;
+      $('import-hint').className = 'imp__hint imp__hint--bad';
+    } else {
+      $('import-hint').textContent = '还没有内容，请粘贴代理链接。';
+      $('import-hint').className = 'imp__hint';
+    }
+  }
+}
+
+async function submitImport() {
+  const text = $('import-text').value;
+  if (!text.trim()) return;
+  const btn = $('btn-import-submit');
+  btn.disabled = true;
+  btn.textContent = '导入中…';
+  try {
+    const r = await fetch('/api/nodes/import', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text }),
+    });
+    if (!r.ok) {
+      let msg = r.status + ' ' + r.statusText;
+      try { const j = await r.json(); if (j.detail) msg = j.detail; } catch (_) {}
+      throw new Error(msg);
+    }
+    const d = await r.json();
+    const parts = [`已导入 ${d.added} 个节点`];
+    if (d.dup_count) parts.push(`跳过 ${d.dup_count} 个重复的`);
+    if (d.bad_count) parts.push(`${d.bad_count} 行无法识别`);
+    toast(parts.join('，'), d.added > 0 ? 'ok' : 'err');
+
+    // 清空并刷新统计; 导入的节点会自动参与下一次检测
+    $('import-text').value = '';
+    resetImportPreview();
+    await refreshAll();
+
+    if (d.added > 0) {
+      $('import-hint').textContent =
+        `已导入 ${d.added} 个节点（当前共 ${d.total_after} 个）。` +
+        '点「重新检测」即可测试它们。';
+      $('import-hint').className = 'imp__hint imp__hint--ok';
+    }
+  } catch (e) {
+    toast('导入失败：' + e.message, 'err');
+    btn.disabled = false;
+    btn.textContent = '导入';
+  }
+}
+
+/** 拖拽 .txt 文件进来 */
+function bindImportDrop() {
+  const drop = $('import-drop');
+  const mask = $('import-dropmask');
+  let depth = 0;
+
+  ['dragenter', 'dragover'].forEach(ev =>
+    drop.addEventListener(ev, (e) => {
+      e.preventDefault();
+      if (ev === 'dragenter') depth++;
+      mask.hidden = false;
+    }));
+
+  ['dragleave', 'drop'].forEach(ev =>
+    drop.addEventListener(ev, (e) => {
+      e.preventDefault();
+      if (ev === 'dragleave') { depth--; if (depth > 0) return; }
+      depth = 0;
+      mask.hidden = true;
+    }));
+
+  drop.addEventListener('drop', async (e) => {
+    const f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+    if (!f) return;
+    try {
+      const text = await f.text();
+      const cur = $('import-text').value.trim();
+      $('import-text').value = cur ? cur + '\n' + text : text;
+      toast(`已读取文件 ${f.name}`, 'ok');
+      previewImport();
+    } catch (err) {
+      toast('读取文件失败：' + err.message, 'err');
+    }
+  });
+}
+
 // ---------------------------------------------------------------- 重新检测
 
 /** 打开确认条, 显示本次将要检测的范围 */
@@ -696,6 +862,30 @@ function bind() {
   });
 
   $('btn-export').addEventListener('click', doExport);
+
+  // ---- 导入节点
+  $('btn-import').addEventListener('click', openImport);
+  $('btn-import-close').addEventListener('click', closeImport);
+  $('btn-import-clear').addEventListener('click', () => {
+    $('import-text').value = '';
+    resetImportPreview();
+    $('import-text').focus();
+  });
+  $('btn-import-submit').addEventListener('click', submitImport);
+  bindImportDrop();
+  // 输入防抖自动检查 (250ms)
+  let impTimer = null;
+  $('import-text').addEventListener('input', () => {
+    clearTimeout(impTimer);
+    impTimer = setTimeout(previewImport, 250);
+  });
+  // Ctrl/Cmd + Enter 直接导入
+  $('import-text').addEventListener('keydown', (e) => {
+    if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+      e.preventDefault();
+      if (!$('btn-import-submit').disabled) submitImport();
+    }
+  });
 
   // ---- 重新检测
   $('btn-retest').addEventListener('click', openRetestConfirm);

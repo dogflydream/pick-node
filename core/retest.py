@@ -26,6 +26,73 @@ from .tester import NodeResult, sort_results, summarize
 from .util import find_kernel, write_text_nobom
 
 
+# ---------------------------------------------------------------- 节点文本解析
+
+
+def parse_nodes_text(text: str) -> list[ParsedNode]:
+    """把多行文本解析成去重后的节点列表.
+
+    规则 (与导入/检测共用, 保证行为一致):
+      - 一行一个 URI
+      - 跳过空行、# 与 // 开头的注释
+      - 解析失败的整行忽略
+      - 按 node_id 去重 (同一节点写多遍只保留一个)
+    """
+    nodes: list[ParsedNode] = []
+    seen: set[str] = set()
+    for line in text.splitlines():
+        s = line.strip()
+        if not s or s.startswith("#") or s.startswith("//"):
+            continue
+        n = parse_uri(s)
+        if not n.ok or n.node_id in seen:
+            continue
+        seen.add(n.node_id)
+        nodes.append(n)
+    return nodes
+
+
+def analyze_import(text: str, existing_ids: set[str]) -> dict[str, Any]:
+    """分析一段待导入的文本, 不改动任何文件.
+
+    返回给前端预览用: 新增几条 / 重复几条 / 无效几行, 以及具体明细.
+    这样用户能在真正写入前看清会发生什么。
+    """
+    new_nodes: list[ParsedNode] = []
+    dup_lines: list[str] = []
+    bad_lines: list[dict[str, str]] = []
+    seen: set[str] = set()
+    total_lines = 0
+
+    for raw in text.splitlines():
+        s = raw.strip()
+        if not s:
+            continue
+        if s.startswith("#") or s.startswith("//"):
+            continue
+        total_lines += 1
+        n = parse_uri(s)
+        if not n.ok:
+            bad_lines.append({"line": s[:120], "error": n.error})
+            continue
+        # 与已有节点重复, 或本批内部重复
+        if n.node_id in existing_ids or n.node_id in seen:
+            dup_lines.append(s[:120])
+            continue
+        seen.add(n.node_id)
+        new_nodes.append(n)
+
+    return {
+        "total_lines": total_lines,
+        "new_count": len(new_nodes),
+        "dup_count": len(dup_lines),
+        "bad_count": len(bad_lines),
+        "new_nodes": new_nodes,
+        "dup_samples": dup_lines[:8],
+        "bad_samples": bad_lines[:8],
+    }
+
+
 # ---------------------------------------------------------------- 作业状态
 
 
@@ -144,17 +211,7 @@ class RetestManager:
             if not self.nodes_file.is_file():
                 return False, f"找不到节点文件: {self.nodes_file.name}"
             text = self.nodes_file.read_text(encoding="utf-8-sig", errors="replace")
-            nodes: list[ParsedNode] = []
-            seen: set[str] = set()
-            for line in text.splitlines():
-                s = line.strip()
-                if not s or s.startswith("#") or s.startswith("//"):
-                    continue
-                n = parse_uri(s)
-                if not n.ok or n.node_id in seen:
-                    continue
-                seen.add(n.node_id)
-                nodes.append(n)
+            nodes = parse_nodes_text(text)
 
             if not nodes:
                 return False, "节点文件中没有可解析的节点"
@@ -199,6 +256,75 @@ class RetestManager:
             self._cancel.set()
             self._state.log.append("收到取消请求, 正在收尾...")
         return True, "正在取消"
+
+    # ---------------------------------------------------------- 导入节点
+
+    def existing_ids(self) -> set[str]:
+        """节点文件里已有的 node_id 集合 (用于判重)."""
+        if not self.nodes_file.is_file():
+            return set()
+        text = self.nodes_file.read_text(encoding="utf-8-sig", errors="replace")
+        return {n.node_id for n in parse_nodes_text(text)}
+
+    def preview_import(self, text: str) -> dict[str, Any]:
+        """预览导入结果 (不写文件)."""
+        return analyze_import(text, self.existing_ids())
+
+    def import_nodes(self, text: str) -> dict[str, Any]:
+        """把一段 URI 文本追加进节点文件, 自动去重.
+
+        行为:
+          - 解析每一行, 跳过空行/注释/无效行
+          - 与【已有节点】和【本批内部】双重去重
+          - 只把新增的追加到文件末尾, 不改动原有内容
+          - 写文件用无 BOM UTF-8 (与内核配置一致, 避免解析问题)
+
+        返回统计信息, 供前端提示"新增 X 条 / 重复 Y 条 / 无效 Z 行".
+        """
+        with self._lock:
+            if self._state.status == "running":
+                return {
+                    "ok": False,
+                    "error": "检测正在运行, 为避免文件被同时读写, 请等检测结束后再导入",
+                }
+
+            result = analyze_import(text, self.existing_ids())
+            new_nodes: list[ParsedNode] = result["new_nodes"]
+
+            if not new_nodes:
+                return {
+                    "ok": True,
+                    "added": 0,
+                    "dup_count": result["dup_count"],
+                    "bad_count": result["bad_count"],
+                    "total_after": len(self.existing_ids()),
+                    "message": "没有需要新增的节点 (全部重复或无效)",
+                    "dup_samples": result["dup_samples"],
+                    "bad_samples": result["bad_samples"],
+                }
+
+            # ---- 追加写入: 保留原文件内容, 只补新增行
+            old = ""
+            if self.nodes_file.is_file():
+                old = self.nodes_file.read_text(encoding="utf-8-sig", errors="replace")
+                if old and not old.endswith("\n"):
+                    old += "\n"
+
+            added_lines = "\n".join(n.raw.strip() for n in new_nodes) + "\n"
+            write_text_nobom(self.nodes_file, old + added_lines)
+
+            total_after = len(self.existing_ids())
+            return {
+                "ok": True,
+                "added": len(new_nodes),
+                "dup_count": result["dup_count"],
+                "bad_count": result["bad_count"],
+                "total_after": total_after,
+                "message": f"已导入 {len(new_nodes)} 个节点",
+                "added_samples": [n.tag[:40] for n in new_nodes[:8]],
+                "dup_samples": result["dup_samples"],
+                "bad_samples": result["bad_samples"],
+            }
 
     # ---------------------------------------------------------- 执行体
 

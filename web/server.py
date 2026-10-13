@@ -206,6 +206,40 @@ def api_reload() -> dict[str, Any]:
     return {"ok": True, "count": len(store.all()), "error": store.error}
 
 
+# ---------------------------------------------------------------- 节点导入
+
+
+@app.post("/api/nodes/preview")
+def api_nodes_preview(payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    """预览导入结果 (不写文件).
+
+    body: {"text": "<多行 URI>"}
+    返回 新增/重复/无效 的条数与样例, 供前端在提交前展示。
+    """
+    text = str((payload or {}).get("text", "") or "")
+    if not text.strip():
+        return {"total_lines": 0, "new_count": 0, "dup_count": 0,
+                "bad_count": 0, "dup_samples": [], "bad_samples": []}
+    info = retest.preview_import(text)
+    info.pop("new_nodes", None)   # 不把内部对象返回给前端
+    return info
+
+
+@app.post("/api/nodes/import")
+def api_nodes_import(payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    """把 URI 追加导入节点文件, 自动去重.
+
+    body: {"text": "<多行 URI>"}
+    """
+    text = str((payload or {}).get("text", "") or "")
+    if not text.strip():
+        raise HTTPException(status_code=400, detail="没有可导入的内容")
+    result = retest.import_nodes(text)
+    if not result.get("ok"):
+        raise HTTPException(status_code=409, detail=result.get("error", "导入失败"))
+    return result
+
+
 # ---------------------------------------------------------------- 重新检测
 
 

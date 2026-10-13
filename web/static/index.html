@@ -33,6 +33,12 @@
         </svg>
         重新载入
       </button>
+      <button type="button" class="btn btn--ghost" id="btn-import" title="粘贴或拖入代理链接, 自动去重">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" aria-hidden="true">
+          <path d="M12 3v12m0-12L8 7m4-4 4 4M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/>
+        </svg>
+        导入节点
+      </button>
       <button type="button" class="btn btn--accent" id="btn-retest" title="对节点重新执行真实网络检测">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" aria-hidden="true">
           <path d="M12 2v4m0 12v4M4.9 4.9l2.8 2.8m8.6 8.6 2.8 2.8M2 12h4m12 0h4M4.9 19.1l2.8-2.8m8.6-8.6 2.8-2.8"/>
@@ -46,6 +52,52 @@
 <main class="page">
 
   <section class="alert alert--warn" id="alert-box" hidden role="status"></section>
+
+  <!-- ============ 导入节点 ============ -->
+  <section class="panel panel--import" id="import-panel" hidden
+           aria-labelledby="import-heading">
+    <div class="imp__head">
+      <h2 class="panel__title" id="import-heading">导入代理节点</h2>
+      <button type="button" class="btn btn--ghost btn--sm" id="btn-import-close"
+              aria-label="关闭导入面板">关闭</button>
+    </div>
+
+    <p class="imp__help">
+      把代理链接粘贴到下面（<strong>一行一个</strong>），也可以直接把
+      <code>.txt</code> 文件拖进来。支持 vless / vmess / trojan / ss /
+      hysteria2 / tuic。<strong>重复的会自动去掉，不用自己清理。</strong>
+    </p>
+
+    <div class="imp__drop" id="import-drop">
+      <textarea id="import-text" rows="7" spellcheck="false"
+        placeholder="vless://xxxxx&#10;vmess://xxxxx&#10;trojan://xxxxx&#10;hysteria2://xxxxx"></textarea>
+      <div class="imp__dropmask" id="import-dropmask" hidden>松开即可导入</div>
+    </div>
+
+    <div class="imp__stats" id="import-stats" hidden>
+      <span class="imp__stat imp__stat--new">
+        可新增 <strong id="imp-new">0</strong></span>
+      <span class="imp__stat imp__stat--dup">
+        重复跳过 <strong id="imp-dup">0</strong></span>
+      <span class="imp__stat imp__stat--bad">
+        无法识别 <strong id="imp-bad">0</strong></span>
+    </div>
+
+    <details class="imp__details" id="import-details" hidden>
+      <summary>查看明细</summary>
+      <div class="imp__detail-body" id="import-detail-body"></div>
+    </details>
+
+    <div class="imp__actions">
+      <span class="imp__hint" id="import-hint">
+        粘贴后会自动检查，确认无误再点「导入」。
+      </span>
+      <button type="button" class="btn btn--ghost" id="btn-import-clear">清空</button>
+      <button type="button" class="btn btn--accent" id="btn-import-submit" disabled>
+        导入
+      </button>
+    </div>
+  </section>
 
   <!-- ============ 重新检测：确认条 ============ -->
   <section class="panel panel--confirm" id="retest-confirm" hidden
