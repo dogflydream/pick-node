@@ -1,4 +1,4 @@
-"""检测器测试.
+"""检测器测试 (需要真实网络与可用的本地上游, 属手工诊断脚本).
 
 关键: 本机直连出口是 China/HK 地区 (google.com 会跳到 google.com.hk),
 这是已知 ground truth, 可以用来验证分类逻辑是否给出正确结论.
@@ -6,7 +6,7 @@
 import sys
 
 sys.path.insert(0, ".")
-from core.detector import Detector, country_name, _GEMINI_BLOCKED_REGIONS
+from core.detector import Detector, country_name
 from core.util import setup_console
 
 setup_console()

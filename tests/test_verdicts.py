@@ -1,9 +1,11 @@
 """单元测试: 判定不变式 (不依赖网络).
 
-覆盖 v2 的两条硬规则:
+覆盖的硬规则:
   1) Antigravity 必须严格跟随 Gemini
   2) Google 未通过时, Gemini 不得判为可用
-  以及异常兜底: 任一阶段抛错也不能留下 gemini=unknown 却被视为可用.
+  3) 【核心】判定不可用看"是否重定向到 google.com.hk", 而不是出口地区
+     —— 实测 24 个 HK 出口里只有 3 个会跳转, 按地区封杀会误杀其余 21 个
+  4) 异常兜底: 任一阶段抛错也不能留下 gemini=unknown 却被视为可用
 """
 import sys
 from pathlib import Path
@@ -110,6 +112,61 @@ b.resolve_antigravity(det)
 check("异常后 gemini != unknown", det.gemini != "unknown", f"={det.gemini}")
 check("异常后 antigravity 不为可用", det.antigravity != "available",
       f"={det.antigravity}")
+
+print()
+print("=" * 92)
+print("6. 【核心】不可用看'是否跳转 com.hk', 不看出口地区")
+print("=" * 92)
+
+# 6a) 出口是 HK, 但没跳转 -> 不应因地区被判 blocked
+det = Detection()
+det.google = "success"
+det.country = "HK"
+det.gemini = "available"          # detect_gemini 给的是"页面可达"
+det.risk_level = "none"           # 没有跳转 => 无风险
+det.hk_redirect = False
+d.resolve_antigravity(det)
+check("HK 出口 + 未跳转 -> Gemini 不被地区否决",
+      det.gemini == "available", f"={det.gemini}")
+check("HK 出口 + 未跳转 -> Antigravity 跟随可用",
+      det.antigravity == "available", f"={det.antigravity}")
+check("HK 出口 + 未跳转 -> 计入潜在可用",
+      is_potentially_usable({
+          "reachable": True, "google": "success",
+          "gemini": "available", "risk_level": "none"}))
+
+# 6b) 出口不是 HK, 但跳转了 -> 必须判不可用
+det = Detection()
+det.google = "success"
+det.country = "SG"
+det.gemini = "available"
+det.hk_redirect = True
+det.risk_level = "high"           # 跳转会置 high
+det.gemini = "blocked"            # detect_gemini 里被风险覆盖
+d.resolve_antigravity(det)
+check("SG 出口 + 跳转 com.hk -> Gemini blocked",
+      det.gemini == "blocked", f"={det.gemini}")
+check("SG 出口 + 跳转 com.hk -> Antigravity blocked",
+      det.antigravity == "blocked", f"={det.antigravity}")
+check("SG 出口 + 跳转 com.hk -> 不计入潜在可用",
+      not is_potentially_usable({
+          "reachable": True, "google": "success",
+          "gemini": "blocked", "risk_level": "high"}))
+
+# 6c) 地区字段本身不再参与否决: HK 也能进可用集合
+check("地区 HK 不再是硬性否决条件",
+      is_potentially_usable({
+          "reachable": True, "google": "success",
+          "gemini": "available", "risk_level": "none", "country": "HK"}))
+
+print()
+print("=" * 92)
+print("7. 中国大陆出口同样是'看跳转不看出口'")
+print("=" * 92)
+check("CN 出口 + 未跳转 -> 仍可判可用",
+      is_potentially_usable({
+          "reachable": True, "google": "success",
+          "gemini": "available", "risk_level": "none", "country": "CN"}))
 
 print()
 print("=" * 92)

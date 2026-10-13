@@ -59,10 +59,19 @@ _TLD_TO_COUNTRY = {
     "ru": "RU", "in": "IN", "com.mx": "MX", "it": "IT", "nl": "NL",
 }
 
-# 明确不支持 Gemini 的地区 (依据 Google 官方支持列表的常见排除项)
-_GEMINI_BLOCKED_REGIONS = {"CN", "HK", "RU", "IR", "KP", "CU", "SY", "VE"}
+# 注意: 本工具【不再按出口地区封锁】判定不可用.
+#
+# 早先版本把 HK / CN 等地区直接判为 blocked, 但实测证伪了这条规则:
+#   - 24 个 HK 出口节点里, 只有 3 个会被重定向到 google.com.hk;
+#     其余 21 个访问 www.google.com 仍停在 www.google.com.
+#   - 反过来, 32 个"跳转到 com.hk"的节点出口根本不在 HK
+#     (JP 11 / US 12 / SG 7 / GB 1 / VN 1).
+# 也就是说"出口地区"与"是否被 Google 重定向"是两件独立的事,
+# 而真正决定可用性的是后者 (见 _analyze_risk).
+#
+# 保留地区白名单仅用于输出"likely/available"的措辞参考, 不参与否决.
 
-# 这些地区通常可以使用 Gemini / Antigravity
+# 这些地区通常可以使用 Gemini / Antigravity (仅作措辞参考)
 _GEMINI_ALLOWED_REGIONS = {
     "US", "JP", "SG", "TW", "KR", "GB", "DE", "FR", "CA", "AU",
     "NL", "IT", "ES", "SE", "CH", "PL", "IN", "BR", "ID", "TH",
@@ -266,7 +275,12 @@ class Detector:
         cloudflare trace 只返回几百字节纯文本, 用它连测多轮取最小值:
           - 最小样本能滤掉偶发抖动, 适合横向对比不同节点
           - 同时给出"连接建立耗时", 反映 TCP+TLS 握手开销
-        返回 (最小 RTT, 首次连接耗时, 全部样本).
+
+        返回 (最小 RTT, 首次连接耗时, 成功样本列表).
+
+        注意: samples 里只有【成功】的轮次. 若某节点抖动导致只有 1 次成功,
+        那 min 就是那一次的值, 参考价值下降 —— 调用方可结合 len(samples)
+        判断可信度 (Web 面板会展示样本数).
         """
         samples: list[int] = []
         first_connect = 0
@@ -274,6 +288,7 @@ class Detector:
             t0 = time.perf_counter()
             try:
                 with client.stream("GET", url) as r:
+                    # 连接建立完成 = 拿到响应头的那一刻
                     connect = int((time.perf_counter() - t0) * 1000)
                     for _ in r.iter_bytes():
                         pass
@@ -423,19 +438,32 @@ class Detector:
 
     def _analyze_risk(self, client: httpx.Client, det: Detection,
                       google_probe: ProbeResult) -> None:
-        """分析 google.com 的重定向行为, 识别被判定为代理/VPN 的节点.
+        """分析 www.google.com 的重定向行为, 判定该出口是否真的不可用.
 
-        判定步骤:
-          1. 收集 google.com 的重定向 Location 链 + 最终 URL
-          2. 在其中匹配风险关键词 (hkredirect / com.hk / cn / sorry / error ...)
-          3. 关键加固证据: 探测 https://gemini.google.com/app
-             若被 302 送到 google.com/sorry, 说明 Google 已对该出口实施风控拦截,
-             这类节点 Gemini 与 Antigravity 实际都不可用.
+        核心判据 (经用户实测确认, 也是最可靠的一条):
+            访问 https://www.google.com
+              -> 被重定向到 https://www.google.com.hk/  =>  确定不可用
+
+        为什么以它为准 (实测数据支撑):
+          - "出口地区"与"是否跳转"是两件独立的事:
+            24 个 HK 出口节点里只有 3 个会跳转, 其余 21 个稳定停在
+            www.google.com; 反过来 32 个跳转节点的出口在 JP/US/SG/GB/VN.
+            因此【不能】按出口地区封杀 —— 那会误杀 21 个好节点.
+          - 在纯 HTTP 层, 跳转与否是唯一能区分二者的可机检信号:
+            两类节点访问 gemini.google.com 都返回 200 与约 792KB 外壳,
+            Gemini 真正的门禁在客户端/API 层, 页面本身看不出差别.
+
+        次要信号 (加固/补充):
+          - gemini.google.com/app 被 302 送到 google.com/sorry => 风控拦截
+          - URL 中出现 sorry / captcha / unusual 等风险词
         """
-        # ---- 1) 关键词匹配
+        # ---- 1) 收集跳转信息
         final = (google_probe.final_url or "").lower()
         chain = " ".join(google_probe.redirect_chain or []).lower()
         haystack = chain + " " + final
+
+        # 核心判据: 最终落到 google.com.hk (含带 pref=hkredirect 的中间跳转)
+        hk_redirect = ("google.com.hk" in haystack) or ("hkredirect" in haystack)
 
         flags: list[str] = []
         for kw, level in _RISK_KEYWORDS.items():
@@ -445,7 +473,7 @@ class Detector:
         det.google_redirected = bool(google_probe.redirect_chain) or bool(
             final and "www.google.com/" not in final.rstrip("/") + "/"
         )
-        det.hk_redirect = "hkredirect" in haystack
+        det.hk_redirect = hk_redirect
         det.risk_flags = flags
 
         # 记录重定向链, 便于人工复核
@@ -455,7 +483,7 @@ class Detector:
                 "chain": google_probe.redirect_chain[:4],
             })
 
-        # ---- 2) 硬证据: gemini/app 是否被送到 sorry 风控页
+        # ---- 2) 加固证据: gemini/app 是否被送到 sorry 风控页
         app_flagged = False
         app_location = ""
         try:
@@ -472,29 +500,29 @@ class Detector:
             det.errors.append(f"gemini-app: {type(e).__name__}: {str(e)[:80]}")
 
         # ---- 3) 汇总风险等级
-        has_high_kw = any(_RISK_KEYWORDS.get(f) == "high" for f in flags)
-        if app_flagged:
+        # 优先级: 跳转 com.hk (用户确认的主判据) > sorry 风控 > 关键词
+        if hk_redirect:
+            det.risk_level = "high"
+            det.risk_reason = (
+                "访问 www.google.com 被重定向到 www.google.com.hk —— "
+                "该出口确定不可用 (Gemini / Antigravity 均无法正常使用)"
+            )
+        elif app_flagged:
             det.risk_level = "high"
             det.risk_reason = (
                 "gemini.google.com/app 被重定向到 google.com/sorry "
-                "(Google 风控拦截) —— 该出口被判定为代理/VPN, "
-                "Gemini 会提示地区不支持, Antigravity 登录会失败"
+                "(Google 风控拦截) —— Gemini 与 Antigravity 均不可用"
             )
-        elif det.hk_redirect and has_high_kw:
-            det.risk_level = "high"
-            det.risk_reason = (
-                f"google.com 本地化重定向命中风险标记 {flags} "
-                "(pref=hkredirect, Google 按中文用户/受限地区策略处理) —— "
-                "该出口被判定为代理/VPN, Gemini 与 Antigravity 实际不可用"
-            )
-        elif has_high_kw:
-            det.risk_level = "high"
-            det.risk_reason = f"google.com 重定向命中风险标记 {flags}"
-        elif flags:
-            det.risk_level = "low"
-            det.risk_reason = f"google.com URL 中出现可疑关键词 {flags} (弱信号)"
         else:
-            det.risk_level = "none"
+            has_high_kw = any(_RISK_KEYWORDS.get(f) == "high" for f in flags)
+            if has_high_kw:
+                det.risk_level = "high"
+                det.risk_reason = f"google.com 重定向命中风险标记 {flags}"
+            elif flags:
+                det.risk_level = "low"
+                det.risk_reason = f"google.com URL 中出现可疑关键词 {flags} (弱信号)"
+            else:
+                det.risk_level = "none"
 
     def detect_gemini(self, proxy_url: str, det: Detection) -> None:
         """分层判定 Gemini 可用性.
@@ -559,19 +587,17 @@ class Detector:
                     )
                 return
 
-            # 结合地区白名单给出结论 (页面可达 + 地区已知支持 => 较可信)
+            # 结合地区给出措辞 (仅参考, 不否决).
+            # 是否"真的不可用"由风险重定向判定, 不看地区 —— 见下方覆盖逻辑.
             cc = (det.country or "").upper()
-            if cc in _GEMINI_BLOCKED_REGIONS:
-                det.gemini = "blocked"
-                det.gemini_reason = f"出口地区 {cc} 不在 Gemini 支持范围"
-            elif cc in _GEMINI_ALLOWED_REGIONS:
+            if cc in _GEMINI_ALLOWED_REGIONS:
                 det.gemini = "available"
                 det.gemini_reason = f"出口地区 {cc} (支持列表), 页面可达"
             else:
                 det.gemini = "likely"
                 det.gemini_reason = (
                     f"出口地区 {cc or '未知'}, 页面可达 —— "
-                    "Gemini 区域门禁在客户端, 建议登录实测"
+                    "建议登录实测确认"
                 )
 
             # ---- 风险重定向覆盖 (优先级最高, 由 detect_google 阶段判定) ----

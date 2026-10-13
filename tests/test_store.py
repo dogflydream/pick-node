@@ -135,13 +135,31 @@ print(f"[{'OK  ' if check_ok else 'FAIL'}] Antigravity 与 Gemini 判定完全�
       f"  ({len(diff)} 个不一致)")
 assert check_ok, [(r["tag"], r["gemini"], r["antigravity"]) for r in diff[:5]]
 
-# 3) 延迟指标的大小关系: rtt (小请求最小) 不应大于端到端总耗时
-viol = [r for r in allrows
-        if r.get("rtt_min_ms") and r.get("latency")
-        and r["rtt_min_ms"] > r["latency"]]
-check_ok = len(viol) == 0
-print(f"[{'OK  ' if check_ok else 'FAIL'}] rtt_min_ms <= latency  ({len(viol)} 个违反)")
+# 3) 延迟指标合理性.
+#    注意: 不能断言 rtt_min_ms <= latency —— 两者测的是【不同目标】:
+#      rtt      : 到 cloudflare.com(几百字节)
+#      latency  : 到 google.com(含约 50KB 首页)
+#    实测确实出现过反例 (某节点到 cloudflare 2.0s, 到 google 却只要 1.9s),
+#    那是两条线路的真实差异, 不是测量错误. 故只校验取值范围.
+bad_range = [r for r in allrows
+             for v in (r.get("rtt_min_ms"), r.get("ttfb_ms"), r.get("latency"))
+             if isinstance(v, (int, float)) and v and not (0 < v < 120_000)]
+check_ok = len(bad_range) == 0
+print(f"[{'OK  ' if check_ok else 'FAIL'}] 延迟指标取值在合理区间 (0 < v < 120s)"
+      f"  ({len(bad_range)} 个越界)")
 assert check_ok
+
+# 3b) RTT 样本数: 有值时应至少有 1 个样本, 且 min 等于样本最小值
+bad_samples = []
+for r in allrows:
+    s = r.get("rtt_samples") or []
+    m = r.get("rtt_min_ms") or 0
+    if s and min(s) != m:
+        bad_samples.append((r.get("tag"), s, m))
+check_ok = len(bad_samples) == 0
+print(f"[{'OK  ' if check_ok else 'FAIL'}] rtt_min_ms == min(rtt_samples)"
+      f"  ({len(bad_samples)} 个不一致)")
+assert check_ok, bad_samples[:3]
 
 # 4) 可用节点必须同时满足 google=success 且 gemini 在可用档
 usable = [r for r in allrows if is_potentially_usable(r)]

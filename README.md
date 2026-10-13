@@ -162,8 +162,8 @@ ss://base64methodpass@example.com:8388#节点名
 
 ```
 [OK]   VLESS     SG   1973ms  AWS新加坡01      Gemini AVAILABLE Antigravity AVAILABLE
-[NO]   HYSTERIA2 HK   1691ms  香港无限7        <出口地区 HK 不在 Gemini 支持范围>
-[NO]   VLESS     US   1019ms  美国圣何塞02     <出口地区 US (支持列表), 页面可达>
+[NO]   HYSTERIA2 HK   1691ms  香港无限7        <访问 google.com 被重定向到 com.hk>
+[NO]   VLESS     US   1019ms  美国圣何塞02     <Google 未通过 (fail)>
 ```
 
 ---
@@ -468,26 +468,42 @@ CHECK_ANTIGRAVITY=true
 > （实测某 IP：ipinfo 判 US、ip-api 判 CN）。因此本工具以 trace 为准，
 > 其他来源仅作补充，不做结论依据。
 
-### 8.2 Google 可达性与地区限制
+> **出口地区只用于展示与参考，不参与"可用/不可用"的否决。**
+> 是否可用看 §8.2 的重定向判据 —— 实测二者并不一致。
 
-被地区限制时，`google.com` 会 302 跳到本地化域名（如 `google.com.hk`），
-`Location` 中带 `pref=hkredirect`、`hl=zh-CN` 等参数。工具会解析**最终域名**
-与整条重定向链，而不是只看状态码。
+### 8.2 核心判据：`www.google.com` 是否被重定向到 `www.google.com.hk`
 
-### 8.3 Gemini / Antigravity —— 请务必了解其边界
+**这是判断节点能否用于 Gemini / Antigravity 最可靠的一条。**
 
-实测结论：**`gemini.google.com` 无论从受限地区还是正常地区访问，都会返回约
-792KB 的应用外壳页面，且页面内不含国家码，也没有 "not available in your
-country" 之类文案。** 地区门禁是在浏览器端 / 登录后 API 层决定的。
+```
+访问 https://www.google.com
+  最终落到 https://www.google.com.hk/   ->   确定不可用
+  仍停在  https://www.google.com/       ->   未被重定向, 可继续判定
+```
 
-因此本工具**不会**仅凭 HTTP 200 就宣称 Gemini 可用，而是按证据强度分层：
+**为什么不看出口地区**：这两件事是独立的，实测数据如下（132 个节点）：
+
+| 现象 | 数量 |
+| --- | --- |
+| 出口是 HK，**但访问 google.com 不跳转** | **21 / 24** |
+| 出口**不是** HK，却跳转到 com.hk | **32**（JP 11 / US 12 / SG 7 / GB 1 / VN 1） |
+
+所以「出口在 HK 就不能用」是错的 —— 会误杀那 21 个好节点；反过来只看地区，
+又会漏掉 32 个出口在美日新、实际已被降级的节点。（早期版本犯过前者，已修正。）
+
+**为什么这条能作为判据**：在纯 HTTP 层，跳转与否是**唯一**能区分二者的信号。
+两类节点访问 `gemini.google.com` 都返回 200 与约 792KB 应用外壳，
+页面内没有国家码、也没有 "not available in your country" 文案 ——
+Gemini 真正的门禁在浏览器端 / 登录后 API 层，从页面本身看不出差别。
+
+### 8.3 Gemini / Antigravity 判定分层
 
 | 判定 | 含义 |
 | --- | --- |
-| `blocked` | 命中明确反面信号：`/sorry/` 风控页、HTTP 429，或出口地区在已知封锁列表（CN / HK / RU / IR 等） |
-| `available` | 出口地区在支持列表 **且** 页面可达 —— 高概率可用 |
-| `likely` | 地区未知或不在已知列表，页面可达 —— **需登录实测确认** |
-| `unavailable` | 请求层面就失败（超时 / TLS 错误 / 连接被拒） |
+| `blocked` | 命中明确反面信号：**跳转到 `com.hk`**、`gemini/app` 被送到 `/sorry/`、HTTP 429 |
+| `available` | 未命中上述信号，Google 与 Gemini 均可达，且出口地区在支持列表 |
+| `likely` | 未命中反面信号，但出口地区不在已知列表 —— **建议登录实测** |
+| `unavailable` | 请求层面就失败（超时 / TLS 错误 / 连接被拒），或 Google 未通过 |
 
 > **建议**：把 `available` 当作可靠候选，把 `likely` 当作待验证候选。
 > 最终能否使用 Gemini，仍取决于账号与登录状态，建议对筛选结果做一次人工复测。
@@ -495,8 +511,8 @@ country" 之类文案。** 地区门禁是在浏览器端 / 登录后 API 层决
 **判定链条（本版本）**：
 
 ```
-出口地区  ──┐
-Google 可达 ─┼─►  两者都 OK  ──►  Gemini 可用  ──►  Antigravity 跟随（同结论）
+Google 可达 ─┐
+Gemini 可达 ─┼─►  都 OK  ──►  未被重定向到 com.hk  ──►  Gemini 可用  ──►  Antigravity 跟随
             │
    风险重定向 ─┴─►  命中即否决（即使上面都 OK）
 ```
@@ -512,6 +528,8 @@ Google 可达 ─┼─►  两者都 OK  ──►  Gemini 可用  ──►  A
 
 - Google 未通过时，Gemini 一律不得判为 `available` / `likely`
 - Antigravity 必须与 Gemini 结论完全一致
+- 跳转到 `com.hk` 的节点必须被排除，无论其出口在哪个地区
+- **出口地区本身不构成否决条件**（HK / CN 出口只要不跳转，仍可判可用）
 - 任何阶段异常都不能留下 `unknown` 被当作可用
 
 ### 8.4 延迟指标：三个口径，别混用
@@ -534,22 +552,21 @@ Google 可达 ─┼─►  两者都 OK  ──►  Gemini 可用  ──►  A
 
 默认排序（推荐优先）也用 `rtt_min_ms`。
 
-### 8.5 风险重定向判定（代理/VPN 检测）
+### 8.5 风险标记（代理/VPN 检测）
 
 Google 会把「机场/代理出口」识别出来并降级处理。这类节点**即使出口在支持地区、
-页面也返回 200，Gemini 与 Antigravity 实际仍不可用**：
-Gemini 会提示「你所在的地区不支持」，Antigravity 客户端登录会报 `token: eof`。
+页面也返回 200，Gemini 与 Antigravity 实际仍不可用**。
 
-工具用两个层次的信号识别它们：
+识别信号按优先级：
 
-| 信号 | 强度 | 说明 |
+| 优先级 | 信号 | 说明 |
 | --- | --- | --- |
-| `gemini.google.com/app` 被 302 送到 `google.com/sorry` | **高（硬证据）** | Google 直接拦截了 Gemini 请求 |
-| `google.com` 重定向带上 `pref=hkredirect` | **高** | Google 按受限地区/中文用户策略处理该出口 |
-| URL 中出现 `com.hk` / `com.cn` / `sorry` / `captcha` / `error` | 中/低 | 弱信号，单独命中记 `low` |
+| 1（主判据） | 访问 `www.google.com` 被重定向到 `www.google.com.hk` | 见 §8.2，最可靠 |
+| 2 | `gemini.google.com/app` 被 302 送到 `google.com/sorry` | Google 风控直接拦截 |
+| 3 | URL 中出现 `sorry` / `captcha` / `unusual` 等词 | 弱信号，单独命中记 `low` |
 
-命中任一高强度信号即标记 `risk_level = "high"`，并**直接判定 Gemini 与
-Antigravity 不可用**，同时从「潜在可用」集合中排除。
+命中 1 或 2 即标记 `risk_level = "high"`，并**直接判定 Gemini 与 Antigravity
+不可用**，同时从「潜在可用」集合中排除。
 
 结果字段：
 
@@ -559,16 +576,16 @@ Antigravity 不可用**，同时从「潜在可用」集合中排除。
   "hk_redirect": true,
   "risk_flags": ["hkredirect", "com.hk"],
   "risk_level": "high",
-  "risk_reason": "gemini.google.com/app 被重定向到 google.com/sorry ..."
+  "risk_reason": "访问 www.google.com 被重定向到 www.google.com.hk —— 该出口确定不可用"
 }
 ```
 
 Web 面板中对应 **风险** 列（`代理/VPN` / `可疑` / `正常`）与 **风险** 筛选器。
 
-> **实测数据**（本机 132 个节点）：命中 `high` 的 35 个节点中，有 30 个此前会被
-> 误判为「Gemini 可用」。加入该规则后潜在可用从 80 降到 49 —— 被剔除的正是
-> 那些**能连通但用不了 AI 服务**的节点。其中 15 个真实 HK 出口节点仍由
-> 「出口地区」规则拦截，两套机制互补而非重复。
+> **实测效果**（本机 132 个节点）：只看是否跳转 `com.hk` 后，潜在可用从
+> **43 升到 63** —— 多出来的正是 18 个「HK 出口但未跳转」的节点，
+> 它们此前被「按地区封杀」误伤。同时 34 个确实跳转的节点被正确排除
+> （其中只有 2 个出口在 HK）。
 
 ### 8.6 为什么不会被本机 v2rayN 干扰
 
@@ -711,22 +728,23 @@ Hysteria2 节点）。
 
 ```
 总节点        : 132
-综合可用      : 43
-Google 可达   : 105
-Gemini 可用   : 40  (可能可用 3)
+综合可用      : 63
+Google 可达   : 103
+Gemini 可用   : 40  (可能可用 23)
 Antigravity   : 40  (跟随 Gemini)
 高风险(代理/VPN): 35
-链路 RTT      : 平均 294 ms   最快 96 ms      <- 推荐比较口径
-Google 首字节 : 平均 1938 ms   最快 562 ms
-Google 端到端 : 平均 2454 ms   最快 562 ms   (含下载首页)
-出口地区分布  : JP:24, HK:24, US:21, SG:10, TH:8, NL:4, VN:3, KR:3, ...
-总耗时        : 142.1 s
+链路 RTT      : 平均 362 ms   最快 96 ms      <- 推荐比较口径
+Google 首字节 : 平均 2314 ms   最快 370 ms
+Google 端到端 : 平均 2902 ms   最快 370 ms   (含下载首页)
+出口地区分布  : HK:24, JP:23, US:21, SG:10, TH:7, NL:4, DE:2, KR:2, CA:2, ...
+总耗时        : 183.8 s
 ```
 
 > **可用数是浮动的**：节点池里的共享出口会随订阅状态、时段、限流而变化。
-> 同一批节点在不同时间跑，可用数可能有明显差异（实测见过 31 ~ 82 之间波动）。
+> 同一批节点在不同时间跑，可用数可能有明显差异。
 > 排查时先看错误类型：如果是大量 `SOCKS/代理连接失败` 或 `TLS 断开`，
 > 多半是节点侧问题，可以先在裸 TCP 层验证（DNS 能解析但端口连不上）。
 >
-> 香港出口节点会因地区限制被判 `blocked`；被 Google 判定为代理/VPN 出口的
-> 节点（`risk_level=high`）即使出口在 US/JP/SG 也会被判 `blocked`。
+> **判定只看"是否跳转 com.hk"，不看出口地区**：HK 出口只要不跳转就仍算可用
+> （实测 24 个 HK 节点里 18 个可用）。被排除的是 `risk_level=high` 的节点，
+> 它们分布在 HK / SG / JP / US / VN / GB 各地。
