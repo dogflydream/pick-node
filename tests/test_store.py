@@ -128,12 +128,38 @@ print(f"[{'OK  ' if check_ok else 'FAIL'}] 无 'google 失败但 gemini 可用' 
       f"  ({len(bad)} 个)")
 assert check_ok, [r["tag"] for r in bad[:5]]
 
-# 2) Antigravity 必须与 Gemini 完全一致 (本版本改为跟随)
+# 2) Antigravity 跟随 Gemini, 但地区口径更严 (HK/MO 只影响 Antigravity).
+#    因此两者【允许】不一致, 但差异必须只能来自 HK/MO —— 别的地区不一致就是 bug.
 diff = [r for r in allrows if r.get("gemini") != r.get("antigravity")]
-check_ok = len(diff) == 0
-print(f"[{'OK  ' if check_ok else 'FAIL'}] Antigravity 与 Gemini 判定完全一致"
-      f"  ({len(diff)} 个不一致)")
-assert check_ok, [(r["tag"], r["gemini"], r["antigravity"]) for r in diff[:5]]
+allowed_cc = {"HK", "MO"}
+unexpected = [r for r in diff
+              if str(r.get("country", "")).upper() not in allowed_cc]
+check_ok = len(unexpected) == 0
+print(f"[{'OK  ' if check_ok else 'FAIL'}] 两服务判定差异仅限 HK/MO"
+      f"  (共 {len(diff)} 个不一致, 其中意外 {len(unexpected)} 个)")
+assert check_ok, [(r["tag"], r.get("country"), r["gemini"], r["antigravity"])
+                  for r in unexpected[:5]]
+
+# 2b) HK/MO 的差异方向必须合理:
+#     正常情况 gemini=available 而 antigravity=blocked;
+#     若 gemini 本身就不可用 (连接失败等), antigravity 随之不可用也合理.
+bad_dir = [r for r in diff
+           if not (r.get("antigravity") == "blocked"
+                   and r.get("gemini") in ("available", "unavailable"))]
+check_ok = len(bad_dir) == 0
+print(f"[{'OK  ' if check_ok else 'FAIL'}] HK/MO 差异方向合理 "
+      f"(ag 恒为 blocked; gemini 为 available 或 unavailable)"
+      f"  ({len(bad_dir)} 个反例)")
+assert check_ok, [(r["tag"], r["gemini"], r["antigravity"]) for r in bad_dir[:5]]
+
+# 2c) 关键: HK/MO 里凡是 gemini 可用的, antigravity 必须被限制
+hkmo_mismatch = [r for r in diff
+                 if r.get("gemini") == "available"
+                 and r.get("antigravity") == "available"]
+check_ok = len(hkmo_mismatch) == 0
+print(f"[{'OK  ' if check_ok else 'FAIL'}] HK/MO 的 Antigravity 无可用反例"
+      f"  ({len(hkmo_mismatch)} 个)")
+assert check_ok
 
 # 3) 延迟指标合理性.
 #    注意: 不能断言 rtt_min_ms <= latency —— 两者测的是【不同目标】:

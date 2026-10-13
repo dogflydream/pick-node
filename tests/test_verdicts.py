@@ -115,34 +115,55 @@ check("异常后 antigravity 不为可用", det.antigravity != "available",
 
 print()
 print("=" * 92)
-print("6. 地区黑名单 (只维护不支持的地区)")
+print("6. 地区黑名单 (双口径: web = Gemini 网页版, api = API/Antigravity)")
 print("=" * 92)
 
 from core.detector import region_status  # noqa: E402
 
-# 6a) 官方不支持的地区 -> 命中黑名单
-for cc in ("CN", "RU", "IR", "BY", "KP", "SY", "CU", "HK", "MO"):
-    bad, why = region_status(cc)
-    check(f"{cc} 在缺省不支持名单", bad, why[:40])
+# 6a) 连网页版都不支持的地区 -> 两个口径都命中
+for cc in ("CN", "RU", "IR", "BY", "KP", "SY", "CU"):
+    w_bad, why = region_status(cc, "web")
+    a_bad, _ = region_status(cc, "api")
+    check(f"{cc} web/api 均不支持", w_bad and a_bad, why[:40])
 
-# 6b) 常见可用地区 -> 不命中黑名单
+# 6b) HK / MO: 网页版【支持】, 但 API/Antigravity 不支持
+#     这正是本项目要区分的关键 —— 早期版本一刀切判 blocked 是错的
+for cc in ("HK", "MO"):
+    w_bad, _ = region_status(cc, "web")
+    a_bad, why = region_status(cc, "api")
+    check(f"{cc} 网页版支持 (web 口径不算不支持)", not w_bad)
+    check(f"{cc} API/Antigravity 不支持 (api 口径命中)", a_bad, why[:44])
+
+# 6c) 常见可用地区 -> 两个口径都不命中
 for cc in ("US", "JP", "SG", "TW", "KR", "DE", "GB", "LV", "UA", "TH", "VN"):
-    bad, why = region_status(cc)
-    check(f"{cc} 不在黑名单", not bad)
+    w_bad, _ = region_status(cc, "web")
+    a_bad, _ = region_status(cc, "api")
+    check(f"{cc} 两个口径都不在名单", not w_bad and not a_bad)
 
-# 6c) 黑名单只影响地区维度, 仍可被风险判据覆盖
-#     (若某地区在名单里, detect_gemini 会直接判 blocked)
+# 6d) 【核心】HK 出口: Gemini 可用, 但 Antigravity 不可用
+#     resolve_antigravity 只改 antigravity, 不动 gemini
 det = Detection()
 det.google = "success"
 det.country = "HK"
-det.gemini = "blocked"            # 地区在黑名单 -> blocked
+det.gemini = "available"          # 网页版 Gemini 在香港可用
 det.risk_level = "none"
 d.resolve_antigravity(det)
-check("HK(黑名单) -> Gemini blocked", det.gemini == "blocked", f"={det.gemini}")
-check("HK(黑名单) -> Antigravity 跟随 blocked",
-      det.antigravity == "blocked", f"={det.antigravity}")
+check("HK -> Gemini 保持可用", det.gemini == "available", f"={det.gemini}")
+check("HK -> Antigravity 被地区限制", det.antigravity == "blocked",
+      f"={det.antigravity}")
 
-# 6d) 非黑名单地区 + 未跳转 -> 可用
+# 6e) MO 同理
+det = Detection()
+det.google = "success"
+det.country = "MO"
+det.gemini = "available"
+det.risk_level = "none"
+d.resolve_antigravity(det)
+check("MO -> Gemini 保持可用", det.gemini == "available", f"={det.gemini}")
+check("MO -> Antigravity 被地区限制", det.antigravity == "blocked",
+      f"={det.antigravity}")
+
+# 6f) 非黑名单地区 + 未跳转 -> 两者都可用
 det = Detection()
 det.google = "success"
 det.country = "JP"
@@ -154,14 +175,13 @@ check("JP 出口 + 未跳转 -> Gemini 可用", det.gemini == "available", f"={d
 check("JP 出口 + 未跳转 -> Antigravity 跟随可用",
       det.antigravity == "available", f"={det.antigravity}")
 
-# 6b) 出口不是 HK, 但跳转了 -> 必须判不可用
+# 6g) 出口不是 HK, 但跳转了 -> 必须判不可用
 det = Detection()
 det.google = "success"
 det.country = "SG"
-det.gemini = "available"
+det.gemini = "blocked"            # detect_gemini 里被风险覆盖
 det.hk_redirect = True
 det.risk_level = "high"           # 跳转会置 high
-det.gemini = "blocked"            # detect_gemini 里被风险覆盖
 d.resolve_antigravity(det)
 check("SG 出口 + 跳转 com.hk -> Gemini blocked",
       det.gemini == "blocked", f"={det.gemini}")
@@ -174,13 +194,22 @@ check("SG 出口 + 跳转 com.hk -> 不计入潜在可用",
 
 print()
 print("=" * 92)
-print("7. 黑名单地区即使页面可达, 也不计入可用")
+print("7. 地区对『潜在可用』的影响 (以 Gemini 为准)")
 print("=" * 92)
-for cc in ("CN", "HK", "MO"):
+# 7a) 连网页版都不支持的地区 -> gemini 被地区判 blocked -> 不计入可用
+for cc in ("CN", "RU", "IR", "BY", "KP", "SY", "CU"):
     check(f"{cc} 出口 -> 不计入潜在可用",
           not is_potentially_usable({
               "reachable": True, "google": "success",
               "gemini": "blocked", "risk_level": "none", "country": cc}))
+
+# 7b) HK / MO 网页版 Gemini 可用 -> 应计入潜在可用
+#     (Antigravity 单独判 blocked, 但不影响"这个节点能不能用网页版 Gemini")
+for cc in ("HK", "MO"):
+    check(f"{cc} 出口 + gemini=available -> 计入潜在可用",
+          is_potentially_usable({
+              "reachable": True, "google": "success",
+              "gemini": "available", "risk_level": "none", "country": cc}))
 
 print()
 print("=" * 92)
