@@ -26,7 +26,17 @@ USABLE_GEMINI = ("available", "likely")
 
 
 def is_potentially_usable(row: dict[str, Any]) -> bool:
-    """判断一条结果是否"潜在可用"."""
+    """判断一条结果是否"潜在可用".
+
+    若该条结果带有【分类体检】结论 (categories 字段非空), 则以分类结论为准 ——
+    因为分类模式下后端只做了该分类的体检, Google 维度的字段可能没测 (全默认值),
+    用旧的 Google 规则会判成不可用.
+    """
+    cats = row.get("categories") or {}
+    if isinstance(cats, dict) and cats:
+        verds = [str((v or {}).get("verdict", "")) for v in cats.values()]
+        return bool(verds) and all(v == "available" for v in verds)
+
     if not row.get("reachable"):
         return False
     if row.get("google") != "success":
@@ -38,6 +48,21 @@ def is_potentially_usable(row: dict[str, Any]) -> bool:
     if str(row.get("gemini", "")) not in USABLE_GEMINI:
         return False
     return True
+
+
+def category_verdict(row: dict[str, Any], key: str) -> str:
+    """取某条结果在指定分类下的结论 (未检测返回空串)."""
+    cats = row.get("categories") or {}
+    if not isinstance(cats, dict):
+        return ""
+    c = cats.get(key)
+    return str((c or {}).get("verdict", "")) if isinstance(c, dict) else ""
+
+
+def row_categories(row: dict[str, Any]) -> list[str]:
+    """该条结果实际检测过的分类列表."""
+    cats = row.get("categories") or {}
+    return sorted(cats.keys()) if isinstance(cats, dict) else []
 
 
 def is_strictly_usable(row: dict[str, Any]) -> bool:
@@ -123,11 +148,17 @@ class ResultStore:
         gemini: str = "",
         antigravity: str = "",
         risk: str = "",
+        category: str = "",
+        cat_verdict: str = "",
         usable_only: bool = False,
         sort: str = "default",
         order: str = "asc",
     ) -> list[dict[str, Any]]:
-        """按条件筛选并排序."""
+        """按条件筛选并排序.
+
+        category:    只看检测过该分类的节点 (xai / google)
+        cat_verdict: 该分类下的结论 (available / blocked / unavailable)
+        """
         rows = self.all()
 
         if search:
@@ -150,6 +181,11 @@ class ResultStore:
                     if str(r.get("antigravity", "")) == antigravity]
         if risk:
             rows = [r for r in rows if str(r.get("risk_level", "none")) == risk]
+        if category:
+            rows = [r for r in rows if category in row_categories(r)]
+            if cat_verdict:
+                rows = [r for r in rows
+                        if category_verdict(r, category) == cat_verdict]
         if usable_only:
             rows = [r for r in rows if is_potentially_usable(r)]
 
@@ -196,6 +232,7 @@ class ResultStore:
             "antigravity_available": count(lambda r: r.get("antigravity") == "available"),
             "risk_high": count(lambda r: str(r.get("risk_level", "none")) == "high"),
             "hk_redirect": count(lambda r: bool(r.get("hk_redirect"))),
+            "categories": self._category_stats(rows),
             "avg_latency": int(sum(lats) / len(lats)) if lats else 0,
             "min_latency": int(min(lats)) if lats else 0,
             "avg_rtt": int(sum(rtts) / len(rtts)) if rtts else 0,
@@ -207,6 +244,26 @@ class ResultStore:
             "error": self._error,
         }
 
+    def _category_stats(self, rows: list[dict[str, Any]]) -> dict[str, Any]:
+        """按分类汇总: 各结论计数 + 各服务明细."""
+        stats: dict[str, Any] = {}
+        for r in rows:
+            cats = r.get("categories") or {}
+            if not isinstance(cats, dict):
+                continue
+            for key, cdata in cats.items():
+                if not isinstance(cdata, dict):
+                    continue
+                b = stats.setdefault(key, {"available": 0, "blocked": 0,
+                                           "unavailable": 0, "unknown": 0,
+                                           "services": {}})
+                b[str(cdata.get("verdict", "unknown"))] = \
+                    b.get(str(cdata.get("verdict", "unknown")), 0) + 1
+                for sk, sv in (cdata.get("services") or {}).items():
+                    sb = b["services"].setdefault(sk, {})
+                    sb[str(sv)] = sb.get(str(sv), 0) + 1
+        return stats
+
     def facets(self) -> dict[str, list[dict[str, Any]]]:
         """给前端筛选下拉用的候选值 (带计数)."""
         rows = self.all()
@@ -215,6 +272,7 @@ class ResultStore:
         geminis: dict[str, int] = {}
         antigravities: dict[str, int] = {}
         risks: dict[str, int] = {}
+        categories: dict[str, int] = {}
         for r in rows:
             for key, bucket in (("country", countries), ("protocol", protocols),
                                 ("gemini", geminis),
@@ -224,12 +282,15 @@ class ResultStore:
                     bucket[v] = bucket.get(v, 0) + 1
             risks[str(r.get("risk_level", "none") or "none")] = \
                 risks.get(str(r.get("risk_level", "none") or "none"), 0) + 1
+            for ck in row_categories(r):
+                categories[ck] = categories.get(ck, 0) + 1
         return {
             "countries": _as_facet(countries),
             "protocols": _as_facet(protocols),
             "gemini": _as_facet(geminis),
             "antigravity": _as_facet(antigravities),
             "risk": _as_facet(risks),
+            "categories": _as_facet(categories),
         }
 
     def export_uris(self, scope: str = "usable", ids: Iterable[str] | None = None) -> list[str]:
