@@ -1,0 +1,349 @@
+"""代理节点批量体检工具 —— 命令行入口.
+
+用法 (Windows):
+    .venv\\Scripts\\python.exe main.py                     # 用 .env 与默认文件名
+    .venv\\Scripts\\python.exe main.py -c 20               # 20 并发
+    .venv\\Scripts\\python.exe main.py -i proxiers.txt     # 指定输入
+    .venv\\Scripts\\python.exe main.py --only-usable       # 只保留可用节点
+
+输入: 一行一个代理 URI (proxiers.txt)
+输出: results.json 全量结果 + proxiers_google.txt 可用代理池
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+import threading
+import time
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from core.detector import Detector, country_name
+from core.launcher import Launcher
+from core.parser import ParsedNode, parse_many
+from core.tester import NodeResult, sort_results, summarize
+from core.util import find_kernel, kernel_version, setup_console, write_text_nobom
+
+HERE = Path(__file__).resolve().parent
+
+
+# ---------------------------------------------------------------- .env
+
+
+def load_env(path: Path) -> None:
+    """极简 .env 加载器 (不引入额外依赖).
+
+    - 支持 KEY=VALUE
+    - 支持 # 注释与空行
+    - 支持引号包裹的值
+    - 已存在的环境变量优先, 不覆盖 (便于命令行临时覆盖)
+    """
+    if not path.is_file():
+        return
+    try:
+        text = path.read_text(encoding="utf-8-sig", errors="replace")
+    except OSError:
+        return
+    for line in text.splitlines():
+        s = line.strip()
+        if not s or s.startswith("#") or "=" not in s:
+            continue
+        k, v = s.split("=", 1)
+        k = k.strip()
+        v = v.strip().strip('"').strip("'")
+        if k and k not in os.environ:
+            os.environ[k] = v
+
+
+def env_path(key: str, default: str) -> str:
+    v = os.environ.get(key, "").strip()
+    return v or default
+
+
+def env_int(key: str, default: int) -> int:
+    try:
+        return int(os.environ.get(key, "").strip() or default)
+    except ValueError:
+        return default
+
+
+def env_bool(key: str, default: bool) -> bool:
+    v = os.environ.get(key, "").strip().lower()
+    if not v:
+        return default
+    return v in ("1", "true", "yes", "on", "y")
+
+
+# ---------------------------------------------------------------- 输出
+
+
+class Reporter:
+    """CLI 进度与结果输出."""
+
+    def __init__(self, verbose: bool = True, stream=None):
+        self.verbose = verbose
+        self.stream = stream or sys.stdout
+        self._lock = threading.Lock()
+        self._t0 = time.time()
+        self._counts = {"ok": 0, "fail": 0}
+
+    def _w(self, s: str) -> None:
+        with self._lock:
+            print(s, file=self.stream, flush=True)
+
+    def header(self, total: int, concurrency: int, kernels: dict) -> None:
+        self._w("=" * 96)
+        self._w("  代理节点批量体检工具  --  出口地区 / Google / Gemini / Antigravity")
+        self._w("=" * 96)
+        for name, exe in kernels.items():
+            if exe:
+                self._w(f"  {name:9} : {exe}")
+                self._w(f"  {'':9}   {kernel_version(exe)}")
+            else:
+                self._w(f"  {name:9} : [未找到]")
+        self._w(f"  待测节点   : {total}")
+        self._w(f"  并发数     : {concurrency}")
+        self._w("=" * 96)
+
+    def progress(self, done: int, total: int, tag: str) -> None:
+        if not self.verbose:
+            return
+        bar_len = 28
+        filled = int(bar_len * done / max(1, total))
+        bar = "#" * filled + "." * (bar_len - filled)
+        pct = 100.0 * done / max(1, total)
+        self._w(f"  [{bar}] {done}/{total} ({pct:5.1f}%)")
+
+    def result(self, r: NodeResult, index: int, total: int) -> None:
+        """输出单节点结果行."""
+        cc = r.country or "--"
+        lat = f"{r.latency}ms" if r.latency else "-"
+        if r.error and not r.reachable:
+            self._w(f"[FAIL] {r.protocol:9} {cc:2} {lat:>8}  {r.tag[:36]}  "
+                    f"<{r.error[:60]}>")
+            return
+        if r.ok:
+            gem = r.gemini.upper()[:9]
+            ag = r.antigravity.upper()[:9]
+            self._w(f"[OK]   {r.protocol:9} {cc:2} {lat:>8}  {r.tag[:36]}  "
+                    f"Gemini {gem:9} Antigravity {ag}")
+        else:
+            reason = r.gemini_reason or r.google or "不可用"
+            self._w(f"[NO]   {r.protocol:9} {cc:2} {lat:>8}  {r.tag[:36]}  "
+                    f"<{reason[:56]}>")
+
+    def footer(self, summary: dict, elapsed: float) -> None:
+        s = summary
+        self._w("=" * 96)
+        self._w("  汇总")
+        self._w("=" * 96)
+        self._w(f"  总节点        : {s['total']}")
+        self._w(f"  综合可用      : {s['usable']}")
+        self._w(f"  Google 可达   : {s['google_ok']}")
+        self._w(f"  Gemini 可用   : {s['gemini_available']}  (可能可用 {s['gemini_likely']})")
+        self._w(f"  Antigravity   : {s['antigravity_available']}  (可能可用 {s['antigravity_likely']})")
+        self._w(f"  平均延迟      : {s['avg_latency_ms']} ms   (最快 {s['min_latency_ms']} ms)")
+        if s["countries"]:
+            tops = ", ".join(f"{k}:{v}" for k, v in list(s["countries"].items())[:12])
+            self._w(f"  出口地区分布  : {tops}")
+        if s["protocols"]:
+            tops = ", ".join(f"{k}:{v}" for k, v in s["protocols"].items())
+            self._w(f"  协议分布      : {tops}")
+        self._w(f"  总耗时        : {elapsed:.1f} s")
+        self._w("=" * 96)
+
+
+# ---------------------------------------------------------------- 输出文件
+
+
+def write_outputs(
+    results: list[NodeResult],
+    results_path: Path,
+    pool_path: Path,
+    only_usable: bool,
+) -> int:
+    """写 results.json 与 代理池文件, 返回写入代理池的节点数."""
+    ordered = sort_results(results)
+
+    # results.json: 全量明细
+    payload = [r.to_dict() for r in ordered]
+    write_text_nobom(results_path, json.dumps(payload, ensure_ascii=False, indent=2))
+
+    # 代理池: 只要可用的原始 URI (可直接被其他工具消费)
+    usable = [r for r in ordered if r.ok]
+    lines = []
+    for r in usable:
+        lines.append(r.node.strip())
+    write_text_nobom(pool_path, "\n".join(lines) + ("\n" if lines else ""))
+    return len(lines)
+
+
+# ---------------------------------------------------------------- main
+
+
+def build_argparser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        description="代理节点批量体检工具 (Windows, 基于 sing-box / xray)",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="示例:\n"
+               "  python main.py                     使用 .env 中的配置\n"
+               "  python main.py -c 20               20 个并发\n"
+               "  python main.py -i my_nodes.txt     指定输入文件\n"
+               "  python main.py --limit 10          只测前 10 个\n"
+               "  python main.py --kernel xray       强制使用 xray\n",
+    )
+    p.add_argument("-i", "--input", help="节点文件 (一行一个 URI)")
+    p.add_argument("-o", "--output", help="结果 JSON 输出路径")
+    p.add_argument("--pool", help="可用节点代理池输出路径")
+    p.add_argument("-c", "--concurrency", type=int, help="最大并发实例数")
+    p.add_argument("--timeout", type=float, help="单个请求超时 (秒)")
+    p.add_argument("--start-timeout", type=float, help="等待实例监听超时 (秒)")
+    p.add_argument("--limit", type=int, help="只测试前 N 个节点")
+    p.add_argument("--kernel", choices=["auto", "sing-box", "xray"],
+                   help="内核选择策略")
+    p.add_argument("--no-antigravity", action="store_true",
+                   help="跳过 Antigravity 检测 (更快)")
+    p.add_argument("--only-usable", action="store_true",
+                   help="代理池只写入综合可用节点")
+    p.add_argument("-q", "--quiet", action="store_true", help="精简输出")
+    p.add_argument("--keep-configs", action="store_true",
+                   help="保留生成的临时配置文件 (默认保留, 便于排查)")
+    p.add_argument("--clean-configs", action="store_true",
+                   help="测试结束后清理临时配置")
+    return p
+
+
+def main(argv: list[str] | None = None) -> int:
+    setup_console()
+    load_env(HERE / ".env")
+
+    args = build_argparser().parse_args(argv)
+
+    # ---- 配置合并: 命令行 > .env > 默认
+    in_file = Path(args.input or env_path("NODES_FILE", "proxiers.txt"))
+    if not in_file.is_absolute():
+        in_file = HERE / in_file
+    out_file = Path(args.output or env_path("RESULTS_FILE", "results.json"))
+    if not out_file.is_absolute():
+        out_file = HERE / out_file
+    pool_file = Path(args.pool or env_path("POOL_FILE", "proxiers_google.txt"))
+    if not pool_file.is_absolute():
+        pool_file = HERE / pool_file
+
+    concurrency = args.concurrency or env_int("CONCURRENCY", 10)
+    timeout = args.timeout or float(env_path("REQUEST_TIMEOUT", "15"))
+    start_timeout = args.start_timeout or float(env_path("START_TIMEOUT", "12"))
+    kernel_pref = args.kernel or env_path("KERNEL", "auto")
+    do_ag = (not args.no_antigravity) and env_bool("CHECK_ANTIGRAVITY", True)
+    only_usable = args.only_usable or env_bool("ONLY_USABLE", False)
+
+    # ---- 读取节点
+    if not in_file.is_file():
+        print(f"[错误] 找不到节点文件: {in_file}", file=sys.stderr)
+        print("       请准备一个一行一个 URI 的文本文件, 或用 -i 指定路径.", file=sys.stderr)
+        return 2
+
+    text = in_file.read_text(encoding="utf-8-sig", errors="replace")
+    good, bad = parse_many(text)
+    if args.limit:
+        good = good[: args.limit]
+
+    print(f"读取 {in_file.name}: 可用节点 {len(good)} 个", end="")
+    if bad:
+        print(f", 解析失败 {len(bad)} 行", end="")
+    print()
+
+    if bad:
+        for n in bad[:8]:
+            print(f"   [跳过] {n.error[:56]}  <- {n.raw[:60]}")
+        if len(bad) > 8:
+            print(f"   ... 另有 {len(bad) - 8} 行解析失败")
+        print()
+
+    if not good:
+        print("[错误] 没有可测试的节点.", file=sys.stderr)
+        return 2
+
+    # ---- 定位内核
+    search_root = env_path("V2RAYN_BIN", r"C:\software\v2rayN-windows-64\bin")
+    singbox = find_kernel("sing-box", search_root)
+    xray = find_kernel("xray", search_root)
+
+    if not singbox and not xray:
+        print("[错误] 未找到 sing-box.exe / xray.exe", file=sys.stderr)
+        print(f"       已搜索: {search_root}", file=sys.stderr)
+        print("       可在 .env 中设置 SING_BOX_PATH / XRAY_PATH 指定路径,", file=sys.stderr)
+        print("       或把可执行文件放到 kernels/ 目录下.", file=sys.stderr)
+        return 3
+
+    # ---- 启动编排
+    launcher = Launcher(
+        workdir=HERE,
+        singbox=singbox,
+        xray=xray,
+        kernel_preference=kernel_pref,
+    )
+    detector = Detector(timeout=timeout, do_antigravity=do_ag)
+    from core.tester import Tester
+
+    reporter = Reporter(verbose=not args.quiet)
+    reporter.header(len(good), concurrency, launcher.available_kernels())
+
+    total = len(good)
+    counter = {"n": 0}
+    lock = threading.Lock()
+
+    def on_event(event: str, payload: dict) -> None:
+        if event == "result":
+            with lock:
+                counter["n"] += 1
+                idx = counter["n"]
+            r = NodeResult(**payload)
+            reporter.result(r, idx, total)
+
+    tester = Tester(
+        launcher=launcher,
+        detector=detector,
+        concurrency=concurrency,
+        start_timeout=start_timeout,
+        on_event=on_event,
+    )
+
+    t0 = time.time()
+    try:
+        results = tester.run(good)
+    except KeyboardInterrupt:
+        print("\n[中断] 正在回收子进程...", file=sys.stderr)
+        launcher.shutdown_all()
+        return 130
+    finally:
+        # 关键: 保证不留孤儿进程
+        launcher.shutdown_all()
+
+    elapsed = time.time() - t0
+    summary = summarize(results)
+    reporter.footer(summary, elapsed)
+
+    # ---- 输出
+    n_pool = write_outputs(results, out_file, pool_file, only_usable)
+    print(f"  结果明细      : {out_file}  ({len(results)} 条)")
+    print(f"  可用代理池    : {pool_file}  ({n_pool} 条)")
+    if args.clean_configs:
+        launcher.cleanup_configs(keep=False)
+        print("  临时配置      : 已清理")
+    else:
+        print(f"  临时配置      : {launcher.cfg_dir} (--clean-configs 可清理)")
+    print()
+
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        sys.exit(130)

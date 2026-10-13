@@ -1,0 +1,12 @@
+[project]
+name = "test-connection"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "fastapi>=0.143.0",
+    "httpx[socks]>=0.28.1",
+    "requests>=2.34.2",
+    "uvicorn>=0.54.0",
+]

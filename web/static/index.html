@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>代理节点体检面板</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;600;700&family=Fira+Sans:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<a class="skip-link" href="#nodes-table">跳到节点列表</a>
+
+<header class="topbar">
+  <div class="topbar__inner">
+    <div class="brand">
+      <svg class="brand__mark" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" aria-hidden="true">
+        <path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20Z"/>
+        <path d="M2 12h20M12 2a15.3 15.3 0 0 1 0 20 15.3 15.3 0 0 1 0-20Z"/>
+      </svg>
+      <div class="brand__text">
+        <h1 class="brand__title">代理节点体检面板</h1>
+        <p class="brand__sub" id="data-meta">正在加载…</p>
+      </div>
+    </div>
+
+    <div class="topbar__actions">
+      <button type="button" class="btn btn--ghost" id="btn-reload" title="重新读取 results.json">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" aria-hidden="true">
+          <path d="M21 12a9 9 0 1 1-2.64-6.36M21 3v6h-6"/>
+        </svg>
+        重新载入
+      </button>
+      <button type="button" class="btn btn--accent" id="btn-retest" title="对节点重新执行真实网络检测">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" aria-hidden="true">
+          <path d="M12 2v4m0 12v4M4.9 4.9l2.8 2.8m8.6 8.6 2.8 2.8M2 12h4m12 0h4M4.9 19.1l2.8-2.8m8.6-8.6 2.8-2.8"/>
+        </svg>
+        <span id="btn-retest-label">重新检测</span>
+      </button>
+    </div>
+  </div>
+</header>
+
+<main class="page">
+
+  <section class="alert alert--warn" id="alert-box" hidden role="status"></section>
+
+  <!-- ============ 重新检测：确认条 ============ -->
+  <section class="panel panel--confirm" id="retest-confirm" hidden
+           aria-labelledby="confirm-heading">
+    <h2 class="panel__title" id="confirm-heading">确认重新检测</h2>
+    <p class="confirm__text" id="confirm-text"></p>
+    <div class="confirm__row">
+      <label class="field__label" for="rt-concurrency">并发数</label>
+      <input type="number" id="rt-concurrency" min="1" max="64" value="10">
+      <span class="confirm__hint">每个并发会拉起一个内核进程（约 50MB 内存）</span>
+    </div>
+    <div class="confirm__actions">
+      <button type="button" class="btn btn--ghost" id="btn-rt-cancel-confirm">取消</button>
+      <button type="button" class="btn btn--accent" id="btn-rt-start">开始检测</button>
+    </div>
+  </section>
+
+  <!-- ============ 重新检测：进度 ============ -->
+  <section class="panel panel--progress" id="retest-progress" hidden
+           aria-labelledby="progress-heading" aria-live="polite">
+    <div class="prog__head">
+      <h2 class="panel__title" id="progress-heading">
+        正在检测 <span class="prog__count" id="rt-count">0 / 0</span>
+      </h2>
+      <div class="prog__meta">
+        <span id="rt-status" class="prog__status">运行中</span>
+        <span class="dim mono" id="rt-elapsed">0.0s</span>
+        <button type="button" class="btn btn--ghost btn--sm" id="btn-rt-stop">停止</button>
+      </div>
+    </div>
+    <div class="prog__bar" role="progressbar" aria-valuemin="0" aria-valuemax="100"
+         aria-valuenow="0" id="rt-bar-outer">
+      <div class="prog__fill" id="rt-bar"></div>
+    </div>
+    <div class="prog__log mono" id="rt-log"></div>
+  </section>
+
+  <!-- ============ 指标卡 ============ -->
+  <section aria-labelledby="metrics-heading">
+    <h2 class="sr-only" id="metrics-heading">总体指标</h2>
+    <div class="metrics" id="metrics">
+      <div class="metric metric--primary">
+        <span class="metric__label">潜在可用</span>
+        <strong class="metric__value" id="m-usable">–</strong>
+        <span class="metric__hint" id="m-usable-hint">可达 + Google 通 + Gemini 未被拒</span>
+      </div>
+      <div class="metric">
+        <span class="metric__label">总节点</span>
+        <strong class="metric__value" id="m-total">–</strong>
+        <span class="metric__hint" id="m-total-hint">—</span>
+      </div>
+      <div class="metric">
+        <span class="metric__label">Google 可达</span>
+        <strong class="metric__value" id="m-google">–</strong>
+        <span class="metric__hint" id="m-google-hint">—</span>
+      </div>
+      <div class="metric">
+        <span class="metric__label">Gemini 可用</span>
+        <strong class="metric__value metric__value--ok" id="m-gemini">–</strong>
+        <span class="metric__hint" id="m-gemini-hint">—</span>
+      </div>
+      <div class="metric">
+        <span class="metric__label">Antigravity</span>
+        <strong class="metric__value metric__value--ok" id="m-ag">–</strong>
+        <span class="metric__hint" id="m-ag-hint">—</span>
+      </div>
+      <div class="metric">
+        <span class="metric__label">平均延迟</span>
+        <strong class="metric__value" id="m-lat">–</strong>
+        <span class="metric__hint" id="m-lat-hint">最快 –</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ 工具栏 ============ -->
+  <section class="panel" aria-labelledby="filters-heading">
+    <h2 class="sr-only" id="filters-heading">筛选与导出</h2>
+
+    <div class="toolbar">
+      <div class="field field--search">
+        <label class="field__label" for="f-search">搜索</label>
+        <div class="input-wrap">
+          <svg class="input-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" aria-hidden="true">
+            <circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/>
+          </svg>
+          <input type="search" id="f-search" placeholder="节点名 / 服务器 / IP …" autocomplete="off">
+        </div>
+      </div>
+
+      <div class="field">
+        <label class="field__label" for="f-country">地区</label>
+        <select id="f-country"><option value="">全部</option></select>
+      </div>
+
+      <div class="field">
+        <label class="field__label" for="f-protocol">协议</label>
+        <select id="f-protocol"><option value="">全部</option></select>
+      </div>
+
+      <div class="field">
+        <label class="field__label" for="f-gemini">Gemini</label>
+        <select id="f-gemini"><option value="">全部</option></select>
+      </div>
+
+      <div class="field">
+        <label class="field__label" for="f-risk">风险</label>
+        <select id="f-risk">
+          <option value="">全部</option>
+          <option value="high">高风险 (代理/VPN)</option>
+          <option value="low">低风险</option>
+          <option value="none">正常</option>
+        </select>
+      </div>
+
+      <div class="field">
+        <label class="field__label" for="f-sort">排序</label>
+        <select id="f-sort">
+          <option value="default">推荐优先</option>
+          <option value="latency">延迟最低</option>
+          <option value="country">按地区</option>
+          <option value="protocol">按协议</option>
+          <option value="tag">按名称</option>
+        </select>
+      </div>
+
+      <div class="field field--check">
+        <label class="switch">
+          <input type="checkbox" id="f-usable" checked>
+          <span class="switch__track" aria-hidden="true"><span class="switch__thumb"></span></span>
+          <span class="switch__label">只看潜在可用</span>
+        </label>
+      </div>
+    </div>
+
+    <div class="actions">
+      <div class="actions__left">
+        <span class="count" id="result-count">–</span>
+      </div>
+      <div class="actions__right">
+        <button type="button" class="btn btn--ghost" id="btn-clear" disabled>清除选择</button>
+        <button type="button" class="btn btn--ghost" id="btn-copy-selected" disabled>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" aria-hidden="true">
+            <rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/>
+          </svg>
+          复制所选
+        </button>
+        <button type="button" class="btn btn--primary" id="btn-export">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" aria-hidden="true">
+            <path d="M12 3v12m0 0 4-4m-4 4-4-4M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/>
+          </svg>
+          导出潜在可用 URI
+        </button>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ 节点表 ============ -->
+  <section class="panel panel--table" aria-labelledby="table-heading">
+    <h2 class="sr-only" id="table-heading">节点列表</h2>
+
+    <div class="table-scroll">
+      <table id="nodes-table" class="table">
+        <caption class="sr-only">代理节点检测结果, 可按列排序</caption>
+        <thead>
+          <tr>
+            <th scope="col" class="col-check">
+              <input type="checkbox" id="check-all" aria-label="全选当前列表">
+            </th>
+            <th scope="col" class="sortable" data-sort="tag" aria-sort="none">节点</th>
+            <th scope="col" class="sortable" data-sort="protocol" aria-sort="none">协议</th>
+            <th scope="col" class="sortable col-ip" data-sort="ip" aria-sort="none">出口 IP</th>
+            <th scope="col" class="sortable" data-sort="country" aria-sort="none">地区</th>
+            <th scope="col">Google</th>
+            <th scope="col">风险</th>
+            <th scope="col">Gemini</th>
+            <th scope="col">Antigravity</th>
+            <th scope="col" class="sortable col-num" data-sort="latency" aria-sort="none">延迟</th>
+          </tr>
+        </thead>
+        <tbody id="tbody"></tbody>
+      </table>
+    </div>
+
+    <div class="empty" id="empty" hidden>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+        <circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/>
+      </svg>
+      <p id="empty-text">没有符合条件的节点</p>
+    </div>
+  </section>
+
+  <!-- ============ 地区分布 ============ -->
+  <section class="panel" aria-labelledby="geo-heading">
+    <h2 class="panel__title" id="geo-heading">出口地区分布</h2>
+    <div class="chips" id="geo-chips"></div>
+  </section>
+
+</main>
+
+<!-- 复制结果提示 -->
+<div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

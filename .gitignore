@@ -1,0 +1,22 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# 代理节点列表与实际节点信息 (含凭据, 不要提交)
+proxiers.txt
+proxiers_google.txt
+*.nodes
+
+# 生成的临时内核配置与日志
+configs/
+kernels/
+
+# 检测结果 (可能含出口 IP 信息)
+results.json
