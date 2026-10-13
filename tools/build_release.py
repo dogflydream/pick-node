@@ -160,6 +160,20 @@ def main() -> int:
                   {"proxiers.txt", "proxiers_google.txt", "results.json", ".env"}]
         check("解压后无凭据文件", not leaked,
               f"发现: {leaked}" if leaked else "")
+
+        # 真正跑一遍核心功能 (解析/导入/判定不变式/静态资源)
+        verify = ROOT / "tools" / "verify_release.py"
+        if verify.is_file():
+            rv = subprocess.run(
+                [sys.executable, str(verify), str(ex)],
+                capture_output=True, text=True, encoding="utf-8",
+                errors="replace",
+            )
+            ok = rv.returncode == 0
+            detail = "" if ok else (rv.stdout + rv.stderr).strip()[-240:]
+            check("解压后核心功能验收", ok, detail)
+        else:
+            check("解压后核心功能验收", True, "（未找到 verify_release.py, 跳过）")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
