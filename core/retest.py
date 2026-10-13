@@ -108,6 +108,7 @@ class JobState:
     finished_at: float = 0.0
     concurrency: int = 0
     scope: str = "all"            # all / selected
+    categories: list[str] = field(default_factory=list)  # 本次检测的分类
     # 每条完成的结果 (给前端实时上色)
     results: list[dict[str, Any]] = field(default_factory=list)
     # 进度日志
@@ -176,6 +177,8 @@ class RetestManager:
         self._state = JobState()
         self._thread: threading.Thread | None = None
         self._cancel = threading.Event()
+        # 本次作业要跑的分类 (空 => 旧的全量 detector 流程)
+        self._categories: list[str] = []
         # 版本号: 每次作业开始 +1, 让前端能分辨是不同的作业
         self._seq = 0
 
@@ -197,11 +200,13 @@ class RetestManager:
         scope: str = "all",
         concurrency: int | None = None,
         limit: int | None = None,
+        categories: list[str] | None = None,
     ) -> tuple[bool, str]:
         """启动重测. 返回 (是否启动成功, 说明).
 
-        node_ids: 指定要重测的 node_id 列表 (网页端勾选的节点).
-        scope:    all / selected, 仅用于展示.
+        node_ids:   指定要重测的 node_id 列表 (网页端勾选的节点).
+        scope:      all / selected, 仅用于展示.
+        categories: 要检测的分类 (xai / google); 空则走旧的全量 detector 流程.
         """
         with self._lock:
             if self._state.status == "running":
@@ -230,6 +235,7 @@ class RetestManager:
             # ---- 重置状态
             self._seq += 1
             self._cancel = threading.Event()
+            self._categories = list(categories or [])
             self._state = JobState(
                 id=f"job{self._seq}-{datetime.now().strftime('%H%M%S')}",
                 status="running",
@@ -237,9 +243,12 @@ class RetestManager:
                 started_at=time.time(),
                 scope=scope,
                 concurrency=concurrency or self.concurrency,
+                categories=list(self._categories),
             )
+            cat_note = (f", 分类 {'/'.join(self._categories)}"
+                        if self._categories else "")
             self._state.log.append(
-                f"开始检测 {len(nodes)} 个节点, 并发 {self._state.concurrency}"
+                f"开始检测 {len(nodes)} 个节点, 并发 {self._state.concurrency}{cat_note}"
             )
 
         self._thread = threading.Thread(
@@ -367,6 +376,7 @@ class RetestManager:
                 start_timeout=self.start_timeout,
                 on_event=on_event,
                 should_stop=self._cancel.is_set,
+                categories=list(self._categories),
             )
 
             results = tester.run(nodes)
@@ -409,18 +419,52 @@ class RetestManager:
 
     # ---------------------------------------------------------- 合并写回
 
+    def _target_files(self) -> tuple[Path, Path]:
+        """本次作业该写哪个结果/代理池文件.
+
+        单分类检测写 results_<cat>.json 与 proxiers_<cat>.txt,
+        避免测 XAI 时覆盖 GOOGLE 的结果 (与 CLI 行为一致).
+        """
+        if len(self._categories) == 1:
+            cat = self._categories[0]
+            rf = self.results_file.with_name(f"results_{cat}.json")
+            pf = self.pool_file.with_name(f"proxiers_{cat}.txt")
+            return rf, pf
+        return self.results_file, self.pool_file
+
     def _merge_and_write(self, results: list[NodeResult]) -> tuple[list[dict], int]:
-        """把本次结果合并进 results.json, 返回 (全部条目, 本次更新数).
+        """把本次结果合并进结果文件, 返回 (全部条目, 本次更新数).
 
         合并规则: 以 node_id 为键, 本次测到的覆盖旧的; 其余节点原样保留.
         这样"只重测勾选的几个节点"不会把其它节点的历史结果冲掉.
+
+        分两步: 先写分类专属文件 (本次真实测到的), 再回写主结果文件
+        (把分类结论合并进主文件, 保持一份总览可用).
         """
+        target_results, target_pool = self._target_files()
+        payload = self._merge_into(target_results, results, replace_only=False)
+
+        # 若写入的是分类专属文件, 再把分类结论合并回主文件 (按 node_id 更新 categories 字段)
+        if target_results != self.results_file:
+            self._merge_categories_into_main(results)
+
+        # 代理池与 CLI 保持一致: 只写潜在可用
+        # 注意: payload 里已经是 dict (NodeResult.to_dict 的结果), 不能再调 to_dict()
+        from .store import is_potentially_usable
+        usable = [str(r.get("node", "")).strip() for r in payload
+                  if is_potentially_usable(r) and str(r.get("node", "")).strip()]
+        write_text_nobom(target_pool,
+                         "\n".join(usable) + ("\n" if usable else ""))
+
+        return payload, len(results)
+
+    def _merge_into(self, path: Path, results: list[NodeResult],
+                    replace_only: bool) -> list[dict]:
+        """把 results 合并进 path 指向的文件并写回, 返回合并后的全部条目."""
         old: list[dict] = []
-        if self.results_file.is_file():
+        if path.is_file():
             try:
-                raw = json.loads(
-                    self.results_file.read_text(encoding="utf-8", errors="replace")
-                )
+                raw = json.loads(path.read_text(encoding="utf-8", errors="replace"))
                 if isinstance(raw, list):
                     old = [r for r in raw if isinstance(r, dict)]
             except (json.JSONDecodeError, OSError):
@@ -438,7 +482,6 @@ class RetestManager:
             else:
                 merged.append(row)              # 保留旧结果
 
-        # 旧文件里没有的节点 (例如新导入的) 追加进来
         for nid, row in new_by_id.items():
             if nid not in replaced:
                 merged.append(row)
@@ -446,18 +489,48 @@ class RetestManager:
         ordered = sort_results([NodeResult(**r) for r in merged
                                 if _is_node_result(r)])
         payload = [r.to_dict() for r in ordered]
-        write_text_nobom(self.results_file,
-                         json.dumps(payload, ensure_ascii=False, indent=2))
+        write_text_nobom(path, json.dumps(payload, ensure_ascii=False, indent=2))
+        return payload
 
-        # 代理池与 CLI 保持一致: 只写潜在可用
-        # 注意: ordered 里已经是 dict (NodeResult.to_dict 的结果), 不能再调 to_dict()
-        from .store import is_potentially_usable
-        usable = [str(r.get("node", "")).strip() for r in payload
-                  if is_potentially_usable(r) and str(r.get("node", "")).strip()]
-        write_text_nobom(self.pool_file,
-                         "\n".join(usable) + ("\n" if usable else ""))
+    def _merge_categories_into_main(self, results: list[NodeResult]) -> None:
+        """把本次的分类结论合并进主结果文件.
 
-        return payload, len(new_by_id)
+        只更新 categories 字段, 不动主文件里已有的其它字段 ——
+        这样主文件始终是一份"见过的节点总览", 而各分类有各自的明细文件.
+        """
+        main = self.results_file
+        if not main.is_file():
+            return
+        try:
+            raw = json.loads(main.read_text(encoding="utf-8", errors="replace"))
+        except (json.JSONDecodeError, OSError):
+            return
+        if not isinstance(raw, list):
+            return
+
+        new_by_id = {r.node_id: r.to_dict() for r in results}
+        changed = False
+        for row in raw:
+            if not isinstance(row, dict):
+                continue
+            nid = str(row.get("node_id", ""))
+            src = new_by_id.get(nid)
+            if not src:
+                continue
+            cats = src.get("categories") or {}
+            if cats:
+                # 合并 (支持逐分类累积: 先测 xai 再测 google)
+                merged_cats = dict(row.get("categories") or {})
+                merged_cats.update(cats)
+                row["categories"] = merged_cats
+                changed = True
+            # 顺带补齐出口信息 (分类检测也探了 trace)
+            for k in ("ip", "country", "country_name"):
+                if not row.get(k) and src.get(k):
+                    row[k] = src[k]
+                    changed = True
+        if changed:
+            write_text_nobom(main, json.dumps(raw, ensure_ascii=False, indent=2))
 
 
 def _is_node_result(row: dict) -> bool:

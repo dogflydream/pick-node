@@ -96,6 +96,50 @@ retest = RetestManager(
 )
 
 
+# ---------------------------------------------------------------- 分类结果源
+#
+# 单分类检测会把结果写到 results_<category>.json (见 main.write_outputs).
+# 这里为每个分类维护独立的 ResultStore, 前端按分类切换视图.
+
+_BASE_RESULTS = ROOT / _env("RESULTS_FILE", "results.json")
+_stores: dict[str, ResultStore] = {}
+
+
+def store_for(category: str = "") -> ResultStore:
+    """取某分类的结果仓库; category 为空则用默认 (results.json)."""
+    key = (category or "").strip().lower()
+    if key not in _stores:
+        if key:
+            p = _BASE_RESULTS.with_name(f"results_{key}.json")
+        else:
+            p = _BASE_RESULTS
+        _stores[key] = ResultStore(p)
+    return _stores[key]
+
+
+# 兼容旧调用点: 默认仓库
+store = store_for("")
+
+
+def available_categories() -> list[dict[str, Any]]:
+    """列出分类及其结果文件是否存在, 供前端显示可切换的页签."""
+    from core.categories import all_categories
+
+    out: list[dict[str, Any]] = []
+    labels = all_categories()
+    for key, label in labels.items():
+        st = store_for(key)
+        rows = st.all()
+        out.append({
+            "key": key,
+            "label": label,
+            "file": st.path.name,
+            "exists": st.path.is_file(),
+            "count": len(rows),
+        })
+    return out
+
+
 # ---------------------------------------------------------------- 依赖刷新
 
 def _refresh() -> None:
@@ -106,18 +150,27 @@ def _refresh() -> None:
 # ---------------------------------------------------------------- API
 
 
+@app.get("/api/categories")
+def api_categories() -> dict[str, Any]:
+    """列出所有分类及其结果文件状态 (供前端页签)."""
+    cats = available_categories()
+    return {"categories": cats, "default": cats[0]["key"] if cats else ""}
+
+
 @app.get("/api/summary")
-def api_summary() -> dict[str, Any]:
-    """汇总统计 (指标卡 + 地区分布)."""
-    _refresh()
-    return store.summary()
+def api_summary(category: str = "") -> dict[str, Any]:
+    """汇总统计 (指标卡 + 地区分布). category 为空用默认结果文件."""
+    st = store_for(category)
+    st.reload_if_changed()
+    return st.summary()
 
 
 @app.get("/api/facets")
-def api_facets() -> dict[str, Any]:
-    """筛选项候选值 (国家/协议/可用性) 及计数."""
-    _refresh()
-    return store.facets()
+def api_facets(category: str = "") -> dict[str, Any]:
+    """筛选项候选值 (国家/协议/可用性/分类) 及计数."""
+    st = store_for(category)
+    st.reload_if_changed()
+    return st.facets()
 
 
 @app.get("/api/nodes")
@@ -128,6 +181,8 @@ def api_nodes(
     gemini: str = "",
     antigravity: str = "",
     risk: str = "",
+    category: str = "",
+    cat_verdict: str = "",
     usable_only: bool = False,
     sort: str = "default",
     order: str = "asc",
@@ -135,24 +190,33 @@ def api_nodes(
 ) -> dict[str, Any]:
     """查询节点列表.
 
-    gemini / antigravity: available / blocked / unavailable —— 按服务可用性筛选.
+    category:    数据源分类 (xai / google); 空则用默认结果文件
+    cat_verdict: 该分类下的结论筛选 (available / blocked / unavailable)
+    gemini / antigravity: 旧版 Google 维度筛选 (保留兼容)
     risk: high / low / none —— 按"是否被判定为代理/VPN 出口"筛选.
     """
-    _refresh()
-    rows = store.query(
+    st = store_for(category)
+    st.reload_if_changed()
+    rows = st.query(
         search=search, protocol=protocol, country=country, gemini=gemini,
-        antigravity=antigravity, risk=risk, usable_only=usable_only,
+        antigravity=antigravity, risk=risk, category="",
+        cat_verdict="", usable_only=usable_only,
         sort=sort, order=order,
     )
+    # 分类结论筛选在第 1 个参数上做 (store 已按 category 过滤数据源)
+    if cat_verdict:
+        from core.store import category_verdict as _cv
+        rows = [r for r in rows if _cv(r, category) == cat_verdict]
     total = len(rows)
     return {"total": total, "items": rows[:limit]}
 
 
 @app.get("/api/meta")
-def api_meta() -> dict[str, Any]:
+def api_meta(category: str = "") -> dict[str, Any]:
     """数据源元信息, 供页面显示"数据更新时间"."""
-    _refresh()
-    p = store.path
+    st = store_for(category)
+    st.reload_if_changed()
+    p = st.path
     mtime = None
     exists = p.is_file()
     if exists:
@@ -170,9 +234,10 @@ def api_meta() -> dict[str, Any]:
         "file": p.name,
         "exists": exists,
         "updated_at": mtime,
-        "count": len(store.all()),
-        "error": store.error,
+        "count": len(st.all()),
+        "error": st.error,
         "node_count": node_count,
+        "category": (category or "").lower(),
         # 供前端确认条显示当前默认配置
         "concurrency": retest.concurrency,
         "nodes_file": retest.nodes_file.name,
@@ -184,16 +249,18 @@ def api_meta() -> dict[str, Any]:
 def api_export(
     scope: str = Query("usable", pattern="^(usable|strict|all)$"),
     ids: str = "",
+    category: str = "",
     download: bool = False,
 ) -> Any:
     """导出节点 URI, 一行一个.
 
-    scope=usable (默认) 只导出"潜在可用"节点:
-      链路可达 + Google 成功 + Gemini 未被明确拒绝(available/likely)
+    scope=usable (默认) 只导出"潜在可用"节点.
+    category: 从哪个分类的结果里导出 (xai / google).
     """
-    _refresh()
+    st = store_for(category)
+    st.reload_if_changed()
     id_list = [x for x in (ids or "").split(",") if x.strip()] or None
-    uris = store.export_uris(scope=scope, ids=id_list)
+    uris = st.export_uris(scope=scope, ids=id_list)
     if not uris:
         raise HTTPException(status_code=404, detail="没有符合条件的节点")
 
@@ -201,6 +268,8 @@ def api_export(
     if download:
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         name = {"usable": "usable", "strict": "strict", "all": "all"}.get(scope, scope)
+        if category:
+            name = f"{category}_{name}"
         return StreamingResponse(
             io.BytesIO(body.encode("utf-8")),
             media_type="text/plain; charset=utf-8",
@@ -210,10 +279,11 @@ def api_export(
 
 
 @app.post("/api/reload")
-def api_reload() -> dict[str, Any]:
+def api_reload(category: str = "") -> dict[str, Any]:
     """强制重新读取结果文件 (测试跑完后手动刷新)."""
-    store.load()
-    return {"ok": True, "count": len(store.all()), "error": store.error}
+    st = store_for(category)
+    st.load()
+    return {"ok": True, "count": len(st.all()), "error": st.error}
 
 
 # ---------------------------------------------------------------- 节点导入
@@ -261,6 +331,7 @@ def api_retest_start(payload: dict[str, Any] | None = None) -> dict[str, Any]:
       node_ids    : 要重测的 node_id 列表 (网页端勾选的节点)
       concurrency : 覆盖并发数
       limit       : 只测前 N 个 (调试用)
+      categories  : 要检测的分类列表 (如 ["xai"]); 不传则用默认
 
     不传 node_ids 时重测 nodes_file 里的全部节点.
     """
@@ -279,8 +350,19 @@ def api_retest_start(payload: dict[str, Any] | None = None) -> dict[str, Any]:
     except (TypeError, ValueError):
         limit = None
 
+    cats = body.get("categories")
+    if isinstance(cats, str):
+        cats = [c.strip() for c in cats.split(",") if c.strip()]
+    if cats:
+        from core.categories import REGISTRY
+        unknown = [c for c in cats if c not in REGISTRY]
+        if unknown:
+            raise HTTPException(status_code=400,
+                                detail=f"未知分类: {unknown}")
+
     ok, msg = retest.start(node_ids=node_ids, scope="all",
-                           concurrency=concurrency, limit=limit)
+                           concurrency=concurrency, limit=limit,
+                           categories=cats)
     if not ok:
         raise HTTPException(status_code=409, detail=msg)
     return {"ok": True, "message": msg, "state": retest.state().snapshot(False)}
