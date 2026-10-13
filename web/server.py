@@ -126,6 +126,7 @@ def api_nodes(
     protocol: str = "",
     country: str = "",
     gemini: str = "",
+    antigravity: str = "",
     risk: str = "",
     usable_only: bool = False,
     sort: str = "default",
@@ -134,12 +135,14 @@ def api_nodes(
 ) -> dict[str, Any]:
     """查询节点列表.
 
-    risk: high / low / none —— 按"是否被 Google 判定为代理/VPN 出口"筛选.
+    gemini / antigravity: available / blocked / unavailable —— 按服务可用性筛选.
+    risk: high / low / none —— 按"是否被判定为代理/VPN 出口"筛选.
     """
     _refresh()
     rows = store.query(
         search=search, protocol=protocol, country=country, gemini=gemini,
-        risk=risk, usable_only=usable_only, sort=sort, order=order,
+        antigravity=antigravity, risk=risk, usable_only=usable_only,
+        sort=sort, order=order,
     )
     total = len(rows)
     return {"total": total, "items": rows[:limit]}

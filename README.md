@@ -392,15 +392,15 @@ CHECK_ANTIGRAVITY=true
 ```json
 [
   {
-    "node": "vless://uuid@pq.aws63.yydjc.top:443?...",
-    "tag": "AWS新加坡01 | 电信移动联通推荐",
+    "node": "vless://uuid@example.com:443?...",
+    "tag": "示例节点01",
     "node_id": "a266c9d0c910",
     "protocol": "VLESS",
-    "server": "pq.aws63.yydjc.top",
+    "server": "example.com",
     "port": 443,
     "local_port": 20003,
     "kernel": "sing-box",
-    "ip": "67.159.48.146",
+    "ip": "203.0.113.10",
     "country": "SG",
     "country_name": "Singapore",
     "city": "",

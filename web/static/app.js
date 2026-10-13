@@ -116,6 +116,7 @@ function currentQuery() {
   if ($('f-country').value) p.set('country', $('f-country').value);
   if ($('f-protocol').value) p.set('protocol', $('f-protocol').value);
   if ($('f-gemini').value) p.set('gemini', $('f-gemini').value);
+  if ($('f-ag').value) p.set('antigravity', $('f-ag').value);
   if ($('f-risk').value) p.set('risk', $('f-risk').value);
   if ($('f-usable').checked) p.set('usable_only', 'true');
   p.set('sort', state.sort);
@@ -219,6 +220,8 @@ async function loadFacets() {
     unavailable: '不可用', unknown: '未知',
   };
   fill($('f-gemini'), f.gemini,
+       i => `${gemLabels[i.value] || i.value} (${i.count})`, true);
+  fill($('f-ag'), f.antigravity || [],
        i => `${gemLabels[i.value] || i.value} (${i.count})`, true);
 }
 
@@ -796,7 +799,7 @@ function bind() {
     t = setTimeout(loadNodes, 220);
   });
 
-  ['f-country', 'f-protocol', 'f-gemini', 'f-risk'].forEach(id => {
+  ['f-country', 'f-protocol', 'f-gemini', 'f-ag', 'f-risk'].forEach(id => {
     $(id).addEventListener('change', () => { syncChips(); loadNodes(); });
   });
   $('f-usable').addEventListener('change', loadNodes);

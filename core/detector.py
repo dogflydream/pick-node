@@ -62,7 +62,7 @@ _TLD_TO_COUNTRY = {
 # ---------------------------------------------------------------- 不支持地区 (黑名单)
 #
 # 只维护【不支持】的地区. 支持列表覆盖 200+ 地区, 枚举既冗长又容易过时,
-# 因此采用黑名单: 命中则降级, 未命中按正常流程判定.
+# 因此采用黑名单: 命中则按对应口径降级, 未命中按正常流程判定.
 #
 # 来源 (Google 官方文档, 2026-10 核对):
 #   Gemini Web App  : https://support.google.com/gemini/answer/13575153
@@ -70,29 +70,28 @@ _TLD_TO_COUNTRY = {
 #                     https://ai.google.dev/gemini-api/docs/available-regions
 #   Antigravity FAQ : https://antigravity.google/docs/faq/
 #
-# 关键差异 (决定了本工具怎么归类):
-#   - 三份名单共同不支持: CN, RU, IR, BY, KP, SY, CU + 克里米亚等制裁地区
-#   - Gemini【API / AI Studio】额外不支持: HK, MO
-#   - Antigravity 也明确不含 HK, MO
-#   - 但 Gemini【网页版】是支持 HK / MO / TW 的
-# 本工具面向的是"能否用 Google AI 服务"(含 API 与 Antigravity),
-# 因此把 HK / MO 一并列入不支持 —— 与用户实测一致:
-# 访问 www.google.com 被重定向到 com.hk 的节点, Gemini/Antigravity 实际不可用.
-#
-# 注意: 这只是【地区维度】的参考. 是否真的不可用, 主判据仍是
-# _analyze_risk 里的"是否被重定向到 com.hk"(实测二者并不等价).
-_UNSUPPORTED_REGIONS = {
-    # 三份名单共同不支持
-    "CN",  # 中国大陆 (Web App 仅 Workspace 支持; API 不支持)
+# 三份名单并不一致, 差异恰好在 HK / MO 上:
+#   - 共同不支持           : CN, RU, IR, BY, KP, SY, CU
+#   - Gemini 网页版        : 支持 HK / MO / TW (支持 230+ 地区)
+#   - Gemini API / AI Studio: 不支持 HK / MO
+#   - Antigravity          : 不支持 HK / MO
+# 因此拆成两份名单, 分别对应两个口径, 避免"网页版能用却被判死".
+
+# 网页版 Gemini 也不支持的地区 (最严格: 这些地方网页版都打不开)
+_UNSUPPORTED_WEB = {
+    "CN",  # 中国大陆 (网页版仅 Workspace 支持)
     "RU",  # 俄罗斯
     "IR",  # 伊朗
     "BY",  # 白俄罗斯
     "KP",  # 朝鲜
     "SY",  # 叙利亚
     "CU",  # 古巴
-    # Gemini API/AI Studio 与 Antigravity 额外排除
-    "HK",  # 香港 (网页版支持, API / Antigravity 不支持)
-    "MO",  # 澳门 (同上)
+}
+
+# Gemini API / AI Studio 与 Antigravity 额外不支持 (网页版却是支持的)
+_UNSUPPORTED_API = {
+    "HK",  # 香港
+    "MO",  # 澳门
 }
 
 # 便于展示: 代码 -> 中文名
@@ -102,16 +101,26 @@ _REGION_NAMES = {
 }
 
 
-def region_status(cc: str) -> tuple[bool, str]:
+def region_status(cc: str, scope: str = "web") -> tuple[bool, str]:
     """判断出口地区是否在 Google AI 服务的不支持名单里.
+
+    scope:
+      "web" —— 只算【网页版 Gemini 都不支持】的地区 (最宽, HK/MO 视为支持)
+      "api" —— 再加上【API / Antigravity 不支持】的地区 (最严, 含 HK/MO)
 
     返回 (是否不支持, 说明). 未命中黑名单时返回 (False, "")。
     """
     cc = (cc or "").upper()
-    if cc in _UNSUPPORTED_REGIONS:
+    bad = cc in _UNSUPPORTED_WEB or (
+        scope == "api" and cc in _UNSUPPORTED_API
+    )
+    if bad:
         name = _REGION_NAMES.get(cc, cc)
-        return True, f"{name}({cc}) 不在 Gemini API / Antigravity 支持范围"
+        if cc in _UNSUPPORTED_WEB:
+            return True, f"{name}({cc}) 不在 Gemini 支持范围"
+        return True, f"{name}({cc}) 网页版 Gemini 可用, 但 API / Antigravity 不支持"
     return False, ""
+
 
 _BROWSER_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -625,16 +634,18 @@ class Detector:
                 return
 
             # 地区维度: 命中黑名单则判 blocked.
-            # 黑名单只列"不支持"的地区 (见文件头注释), 未命中即视为地区没问题.
+            # 地区维度: 用 "web" 口径 —— 只排除网页版 Gemini 都不支持的地区.
+            # HK / MO 网页版是支持的, 因此这里【不再】判 blocked
+            # (它们只影响 Antigravity, 由 resolve_antigravity 另行处理).
             cc = (det.country or "").upper()
-            unsupported, why = region_status(cc)
+            unsupported, why = region_status(cc, scope="web")
             if unsupported:
                 det.gemini = "blocked"
                 det.gemini_reason = why
                 return
             det.gemini = "available"
             det.gemini_reason = (
-                f"出口地区 {cc or '未知'} (不在不支持名单), 页面可达"
+                f"出口地区 {cc or '未知'} 网页版可用, 页面可达"
             )
 
             # ---- 风险重定向覆盖 (优先级最高, 由 detect_google 阶段判定) ----
@@ -648,9 +659,9 @@ class Detector:
                 det.gemini_reason = f"风险重定向: {det.risk_reason}"
 
     def resolve_antigravity(self, det: Detection) -> None:
-        """Antigravity 判定 —— 直接跟随 Google + Gemini 的结果.
+        """Antigravity 判定 = 跟随 Google + Gemini, 但地区用更严的 API 口径.
 
-        为什么不独立探测 (本版本的决策依据, 有实测支撑):
+        为什么不独立探测 (有实测支撑):
           上一版本对 antigravity.google 做独立 HTTP 探测, 但抽检发现误判率很高:
           对 6 个判为 unavailable 的节点各重试 3 次, 有 4 个其实能成功 (67% 假阴性).
           原因是这些共享出口会间歇性丢连接, 而"单次失败即判死"把抖动当成了结论;
@@ -658,8 +669,11 @@ class Detector:
           另外 antigravity.google 首页只证明"静态页能下载", 与客户端登录后能否
           真正使用 (用户反馈会报 token: eof) 并没有可靠的对应关系。
 
-        因此改为: Google 与 Gemini 都通过 => Antigravity 同样判为可用.
-        判定链条更短、更可解释, 也不会再引入独立探测的噪声。
+        与 Gemini 的唯一区别在于地区口径:
+          Gemini 走 "web" 口径 (HK / MO 算支持, 网页版确实能用);
+          Antigravity 走 "api" 口径 (HK / MO 不支持, 与官方 FAQ 一致)。
+          所以 HK / MO 节点会出现 gemini=available 而 antigravity=blocked,
+          这是【预期行为】, 不是矛盾。
         """
         g, gem = det.google, det.gemini
         # 防线一: Google 未通过时, 不允许 Gemini 系列结论为"可用".
@@ -679,6 +693,21 @@ class Detector:
                 f"跟随 Google/Gemini: Google={g}, Gemini 未得出明确结论"
             )
             return
+
+        # 防线三: Antigravity 独有的地区限制 (比 Gemini 更严).
+        # Gemini 可用 ≠ Antigravity 可用: HK / MO 网页版能用 Gemini,
+        # 但 Antigravity 官方明确不支持。
+        cc = (det.country or "").upper()
+        ag_bad, ag_why = region_status(cc, scope="api")
+        if ag_bad and cc in _UNSUPPORTED_API:
+            det.antigravity = "blocked"
+            det.antigravity_reason = f"{ag_why} (Gemini 网页版仍可用)"
+            return
+        if ag_bad:
+            det.antigravity = "blocked"
+            det.antigravity_reason = ag_why
+            return
+
         if gem == "available":
             det.antigravity = "available"
             det.antigravity_reason = "跟随 Gemini (Google 与 Gemini 均可用)"

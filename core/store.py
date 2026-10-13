@@ -121,6 +121,7 @@ class ResultStore:
         protocol: str = "",
         country: str = "",
         gemini: str = "",
+        antigravity: str = "",
         risk: str = "",
         usable_only: bool = False,
         sort: str = "default",
@@ -144,6 +145,9 @@ class ResultStore:
             rows = [r for r in rows if str(r.get("country", "")).upper() == country.upper()]
         if gemini:
             rows = [r for r in rows if str(r.get("gemini", "")) == gemini]
+        if antigravity:
+            rows = [r for r in rows
+                    if str(r.get("antigravity", "")) == antigravity]
         if risk:
             rows = [r for r in rows if str(r.get("risk_level", "none")) == risk]
         if usable_only:
@@ -209,10 +213,12 @@ class ResultStore:
         countries: dict[str, int] = {}
         protocols: dict[str, int] = {}
         geminis: dict[str, int] = {}
+        antigravities: dict[str, int] = {}
         risks: dict[str, int] = {}
         for r in rows:
             for key, bucket in (("country", countries), ("protocol", protocols),
-                                ("gemini", geminis)):
+                                ("gemini", geminis),
+                                ("antigravity", antigravities)):
                 v = str(r.get(key, "") or "")
                 if v:
                     bucket[v] = bucket.get(v, 0) + 1
@@ -222,6 +228,7 @@ class ResultStore:
             "countries": _as_facet(countries),
             "protocols": _as_facet(protocols),
             "gemini": _as_facet(geminis),
+            "antigravity": _as_facet(antigravities),
             "risk": _as_facet(risks),
         }
 
