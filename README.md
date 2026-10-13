@@ -46,8 +46,9 @@ Gemini 与 Antigravity 可用性、延迟、综合可用性。
 | --- | --- |
 | 系统 | Windows 10 / 11 |
 | Python | 3.10+（本项目用 3.13 验证） |
+| uv | 推荐，用于一键同步依赖（见 §3.1；没有也可用内置 venv） |
 | 内核 | `sing-box.exe` 与 `xray.exe`（v2rayN 自带即可） |
-| 依赖 | `httpx[socks]`（必需）、`fastapi` + `uvicorn`（仅 Web 面板需要） |
+| 依赖 | `httpx[socks]`、`fastapi` + `uvicorn`（Web 面板需要） |
 
 本项目已在以下版本实测通过：
 
