@@ -1,12 +1,21 @@
 [project]
-name = "test-connection"
-version = "0.1.0"
-description = "Add your description here"
+name = "proxy-tester"
+version = "3.0.0"
+description = "代理节点批量体检工具: 检测出口地区 / Google / Gemini 可用性, 并导出可用节点 URI"
 readme = "README.md"
-requires-python = ">=3.13"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+keywords = ["proxy", "vless", "vmess", "hysteria2", "gemini", "sing-box", "xray"]
 dependencies = [
     "fastapi>=0.143.0",
     "httpx[socks]>=0.28.1",
-    "requests>=2.34.2",
     "uvicorn>=0.54.0",
+    # 单节点手工验证脚本 test_google.py 用到; 保留以免破坏它
+    "requests>=2.34.2",
 ]
+
+[project.urls]
+Documentation = "https://github.com/"
+
+[project.scripts]
+proxy-tester = "main:main"

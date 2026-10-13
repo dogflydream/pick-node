@@ -1,22 +1,73 @@
-# Python-generated files
+# ============================================================
+#  Python
+# ============================================================
 __pycache__/
-*.py[oc]
+*.py[cod]
+*$py.class
+*.so
 build/
 dist/
 wheels/
-*.egg-info
+*.egg-info/
+.eggs/
+.installed.cfg
 
-# Virtual environments
-.venv
+# 虚拟环境 (uv / venv / conda 等)
+.venv/
+venv/
+env/
+ENV/
+# 注意: 不忽略 .python-version —— 它已纳入版本控制, 用于固定 Python 版本
 
-# 代理节点列表与实际节点信息 (含凭据, 不要提交)
+# 测试与覆盖率
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.mypy_cache/
+.ruff_cache/
+
+# ============================================================
+#  本工具运行时产物
+# ============================================================
+
+# ---- 代理节点列表 (含真实凭据, 绝对不能提交) ----
 proxiers.txt
 proxiers_google.txt
+proxies.txt
 *.nodes
+nodes*.txt
+!requirements*.txt          # 别误伤依赖清单
 
-# 生成的临时内核配置与日志
-configs/
-kernels/
-
-# 检测结果 (可能含出口 IP 信息)
+# ---- 检测结果 (含出口 IP、地区等隐私信息) ----
 results.json
+results_*.json
+pool_*.txt
+
+# ---- 内核可执行文件 (体积大且受各自许可约束, 不随仓库分发) ----
+kernels/
+*.exe
+
+# ---- 自动生成的临时内核配置与日志 ----
+configs/
+*.log
+
+# ============================================================
+#  编辑器 / 系统
+# ============================================================
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ============================================================
+#  本地配置
+# ============================================================
+# .env 里只有本机路径与并发设置, 不含凭据, 作为模板提交.
+# 若要放私密内容 (例如 GitHub token), 请改用 .env.local
+.env.local
