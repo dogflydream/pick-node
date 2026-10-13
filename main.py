@@ -119,21 +119,26 @@ class Reporter:
         self._w(f"  [{bar}] {done}/{total} ({pct:5.1f}%)")
 
     def result(self, r: NodeResult, index: int, total: int) -> None:
-        """输出单节点结果行."""
+        """输出单节点结果行.
+
+        延迟列用 rtt_min_ms (小请求往返最小值) —— 它最接近"节点快不快",
+        而不是混入了 Google 首页 body 下载的 latency.
+        """
         cc = r.country or "--"
-        lat = f"{r.latency}ms" if r.latency else "-"
+        rtt = f"{r.rtt_min_ms}ms" if r.rtt_min_ms else (
+            f"{r.latency}ms" if r.latency else "-")
         if r.error and not r.reachable:
-            self._w(f"[FAIL] {r.protocol:9} {cc:2} {lat:>8}  {r.tag[:36]}  "
+            self._w(f"[FAIL] {r.protocol:9} {cc:2} {rtt:>8}  {r.tag[:36]}  "
                     f"<{r.error[:60]}>")
             return
         if r.ok:
             gem = r.gemini.upper()[:9]
             ag = r.antigravity.upper()[:9]
-            self._w(f"[OK]   {r.protocol:9} {cc:2} {lat:>8}  {r.tag[:36]}  "
+            self._w(f"[OK]   {r.protocol:9} {cc:2} {rtt:>8}  {r.tag[:36]}  "
                     f"Gemini {gem:9} Antigravity {ag}")
         else:
             reason = r.gemini_reason or r.google or "不可用"
-            self._w(f"[NO]   {r.protocol:9} {cc:2} {lat:>8}  {r.tag[:36]}  "
+            self._w(f"[NO]   {r.protocol:9} {cc:2} {rtt:>8}  {r.tag[:36]}  "
                     f"<{reason[:56]}>")
 
     def footer(self, summary: dict, elapsed: float) -> None:
@@ -145,8 +150,16 @@ class Reporter:
         self._w(f"  综合可用      : {s['usable']}")
         self._w(f"  Google 可达   : {s['google_ok']}")
         self._w(f"  Gemini 可用   : {s['gemini_available']}  (可能可用 {s['gemini_likely']})")
-        self._w(f"  Antigravity   : {s['antigravity_available']}  (可能可用 {s['antigravity_likely']})")
-        self._w(f"  平均延迟      : {s['avg_latency_ms']} ms   (最快 {s['min_latency_ms']} ms)")
+        self._w(f"  Antigravity   : {s['antigravity_available']}  (跟随 Gemini)")
+        if s.get("risk_high"):
+            self._w(f"  高风险(代理/VPN): {s['risk_high']}")
+        # 三个延迟口径分别展示, 避免把"含 body 下载"的数字误当节点速度
+        self._w(f"  链路 RTT      : 平均 {s.get('avg_rtt_ms', 0)} ms   "
+                f"最快 {s.get('min_rtt_ms', 0)} ms      <- 推荐比较口径")
+        self._w(f"  Google 首字节 : 平均 {s.get('avg_ttfb_ms', 0)} ms   "
+                f"最快 {s.get('min_ttfb_ms', 0)} ms")
+        self._w(f"  Google 端到端 : 平均 {s.get('avg_latency_ms', 0)} ms   "
+                f"最快 {s.get('min_latency_ms', 0)} ms   (含下载首页)")
         if s["countries"]:
             tops = ", ".join(f"{k}:{v}" for k, v in list(s["countries"].items())[:12])
             self._w(f"  出口地区分布  : {tops}")
@@ -287,7 +300,8 @@ def main(argv: list[str] | None = None) -> int:
         xray=xray,
         kernel_preference=kernel_pref,
     )
-    detector = Detector(timeout=timeout, do_antigravity=do_ag)
+    detector = Detector(timeout=timeout, do_antigravity=do_ag,
+                        rtt_rounds=env_int("RTT_ROUNDS", 3))
     from core.tester import Tester
 
     reporter = Reporter(verbose=not args.quiet)

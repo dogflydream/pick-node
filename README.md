@@ -119,7 +119,7 @@ ss://base64methodpass@example.com:8388#节点名
 | `--kernel` | `auto` / `sing-box` / `xray` |
 | `--timeout` | 单请求超时秒数（默认 15） |
 | `--start-timeout` | 等待实例监听秒数（默认 12） |
-| `--no-antigravity` | 跳过 Antigravity 检测，更快 |
+| ~~`--no-antigravity`~~ | 已失效：本版本 Antigravity 跟随 Gemini、不再独立探测；参数保留仅为兼容旧脚本 |
 | `--only-usable` | 代理池只写综合可用节点 |
 | `--clean-configs` | 结束后清理临时配置 |
 | `-q, --quiet` | 精简输出 |
@@ -169,12 +169,12 @@ ss://base64methodpass@example.com:8388#节点名
 
 | 区域 | 能做什么 |
 | --- | --- |
-| 指标卡 | 潜在可用 / 总节点 / Google 可达 / Gemini 可用 / Antigravity / 平均延迟 |
+| 指标卡 | 潜在可用 / 总节点 / Google 可达 / Gemini 可用 / Antigravity / **链路 RTT** / **首字节** |
 | 搜索 | 按节点名、服务器地址、出口 IP 搜索（支持中文） |
 | 地区 / 协议 / Gemini / 风险 | 下拉筛选，带数量统计 |
 | 只看潜在可用 | 开关，默认开启（只看能用的，关掉可看全部并排查失败原因） |
-| 排序 | 推荐优先 / 延迟最低 / 按地区 / 按协议 / 按名称；也可点表头切换升降序 |
-| 表格 | 节点名、协议、出口 IP、地区、Google / **风险** / Gemini / Antigravity 状态、延迟，全部带颜色标识 |
+| 排序 | 推荐优先 / 链路 RTT 最低 / 首字节最快 / 总耗时最短 / 按地区 / 按协议 / 按名称；也可点表头切换升降序 |
+| 表格 | 节点名、协议、出口 IP、地区、Google / 风险 / Gemini / Antigravity 状态、**三个延迟指标**，全部带颜色标识 |
 | 勾选 | 表头全选，或逐条勾选 |
 | 出口地区分布 | 点地区 chip 可直接筛选 |
 | 重新载入 | 重新读取 `results.json`（测试跑完不用重启面板） |
@@ -316,8 +316,12 @@ CHECK_ANTIGRAVITY=true
     "gemini": "available",
     "gemini_reason": "出口地区 SG (支持列表), 页面可达",
     "antigravity": "available",
-    "antigravity_reason": "出口地区 SG, 页面可达",
-    "latency": 1973,
+    "antigravity_reason": "跟随 Gemini (Google 与 Gemini 均可用)",
+    "rtt_min_ms": 199,
+    "rtt_samples": [199, 214, 231],
+    "connect_ms": 412,
+    "ttfb_ms": 1084,
+    "latency": 1412,
     "reachable": true,
     "ok": true,
     "confidence": "high",
@@ -337,8 +341,13 @@ CHECK_ANTIGRAVITY=true
 | `risk_level` | `high` / `low` / `none` —— 是否被 Google 判定为代理/VPN 出口 |
 | `risk_flags` | 命中的风险关键词，如 `["hkredirect","com.hk"]` |
 | `hk_redirect` | 是否命中 `pref=hkredirect` 本地化跳转 |
-| `gemini` / `antigravity` | `available` / `likely` / `blocked` / `unavailable` / `unknown` |
-| `latency` | 通过该节点的请求耗时（毫秒） |
+| `gemini` | `available` / `likely` / `blocked` / `unavailable` |
+| `antigravity` | 与 `gemini` 始终一致（跟随 Gemini） |
+| `rtt_min_ms` | **链路往返（小请求连测取最小值）—— 推荐用这个比快慢** |
+| `rtt_samples` | RTT 的原始采样，便于判断稳定性 |
+| `connect_ms` | 小请求的连接建立（TCP+TLS）耗时 |
+| `ttfb_ms` | `google.com` 首字节时间（不含下载页面） |
+| `latency` | `google.com` 端到端总耗时（含下载首页，旧口径） |
 | `reachable` | 代理链路本身是否通 |
 | `ok` | 综合可用：链路通 + Google 可达 + Gemini 未被明确拒绝 |
 | `confidence` | 结论置信度 `high` / `medium` / `low` |
@@ -388,7 +397,49 @@ country" 之类文案。** 地区门禁是在浏览器端 / 登录后 API 层决
 > **建议**：把 `available` 当作可靠候选，把 `likely` 当作待验证候选。
 > 最终能否使用 Gemini，仍取决于账号与登录状态，建议对筛选结果做一次人工复测。
 
-### 8.4 风险重定向判定（代理/VPN 检测）
+**判定链条（本版本）**：
+
+```
+出口地区  ──┐
+Google 可达 ─┼─►  两者都 OK  ──►  Gemini 可用  ──►  Antigravity 跟随（同结论）
+            │
+   风险重定向 ─┴─►  命中即否决（即使上面都 OK）
+```
+
+**Antigravity 不做独立探测，直接跟随 Google + Gemini 的结论。**
+原因是上一版本独立请求 `antigravity.google` 的误判率很高（实测抽检 6 个判死的
+节点，重试后 4 个其实可用，67% 假阴性）：这些共享出口会间歇性丢连接，
+"单次失败即判死" 把抖动当成了结论；而且该探测排在请求序列最后，更容易撞上限流。
+另外 `antigravity.google` 首页只证明静态页能下载，与客户端登录后能否真正使用
+（用户反馈会报 `token: eof`）并没有可靠对应关系。
+
+**硬性不变式**（有单元测试守着，见 `tests/test_verdicts.py`）：
+
+- Google 未通过时，Gemini 一律不得判为 `available` / `likely`
+- Antigravity 必须与 Gemini 结论完全一致
+- 任何阶段异常都不能留下 `unknown` 被当作可用
+
+### 8.4 延迟指标：三个口径，别混用
+
+工具采集三个延迟，**都包含经过代理链路的开销**，但测量范围不同：
+
+| 字段 | 测的是什么 | 用途 |
+| --- | --- | --- |
+| `rtt_min_ms` | 对 `cloudflare.com/cdn-cgi/trace` **连测 3 次取最小值**。无重定向、body 仅几百字节 | **推荐**用它比较节点快慢 —— 最干净、抖动最小 |
+| `connect_ms` | 该请求的连接建立（TCP + TLS 握手）耗时 | 看握手开销 |
+| `ttfb_ms` | 访问 `google.com` 的**首字节**时间（不含 body 下载） | 反映"打开 Google 要等多久" |
+| `latency` | 访问 `google.com` 的**端到端**耗时（含到 `google.com.hk` 的 302 跳转 + 下载约 50KB 首页） | 旧口径，仅为兼容保留 |
+
+> **为什么不建议用 `latency` 排名**：它混入了重定向与首页 body 下载的时间。
+> 实测同一批美国节点 `rtt ≈ 210ms` 而 `latency ≈ 2600ms` —— 差的这 2.4 秒
+> 基本是服务端处理与传页面，不是链路慢。
+>
+> **为什么 RTT 取最小值**：首次请求要建连（DNS + TCP + TLS），后续请求复用连接
+> 会明显更快。实测样本 `[1928, 614, 467]` —— 取最小值才代表这条链路的真实水平。
+
+默认排序（推荐优先）也用 `rtt_min_ms`。
+
+### 8.5 风险重定向判定（代理/VPN 检测）
 
 Google 会把「机场/代理出口」识别出来并降级处理。这类节点**即使出口在支持地区、
 页面也返回 200，Gemini 与 Antigravity 实际仍不可用**：
@@ -424,7 +475,7 @@ Web 面板中对应 **风险** 列（`代理/VPN` / `可疑` / `正常`）与 **
 > 那些**能连通但用不了 AI 服务**的节点。其中 15 个真实 HK 出口节点仍由
 > 「出口地区」规则拦截，两套机制互补而非重复。
 
-### 8.5 为什么不会被本机 v2rayN 干扰
+### 8.6 为什么不会被本机 v2rayN 干扰
 
 工具显式设置 `trust_env=False`。这一点非常关键：
 
@@ -550,13 +601,22 @@ Hysteria2 节点）。
 
 ```
 总节点        : 132
-综合可用      : 82
-Google 可达   : 109
-Gemini 可用   : 81  (可能可用 2)
-Antigravity   : 81  (可能可用 3)
-平均延迟      : 2875 ms
-出口地区分布  : JP:24, HK:22, US:21, SG:10, TH:7, NL:4, VN:3, KR:3, ...
-总耗时        : 170.7 s
+综合可用      : 43
+Google 可达   : 105
+Gemini 可用   : 40  (可能可用 3)
+Antigravity   : 40  (跟随 Gemini)
+高风险(代理/VPN): 35
+链路 RTT      : 平均 294 ms   最快 96 ms      <- 推荐比较口径
+Google 首字节 : 平均 1938 ms   最快 562 ms
+Google 端到端 : 平均 2454 ms   最快 562 ms   (含下载首页)
+出口地区分布  : JP:24, HK:24, US:21, SG:10, TH:8, NL:4, VN:3, KR:3, ...
+总耗时        : 142.1 s
 ```
 
-所有 22 个香港节点均因地区限制被正确标记为不支持 Gemini。
+> **可用数是浮动的**：节点池里的共享出口会随订阅状态、时段、限流而变化。
+> 同一批节点在不同时间跑，可用数可能有明显差异（实测见过 31 ~ 82 之间波动）。
+> 排查时先看错误类型：如果是大量 `SOCKS/代理连接失败` 或 `TLS 断开`，
+> 多半是节点侧问题，可以先在裸 TCP 层验证（DNS 能解析但端口连不上）。
+>
+> 香港出口节点会因地区限制被判 `blocked`；被 Google 判定为代理/VPN 出口的
+> 节点（`risk_level=high`）即使出口在 US/JP/SG 也会被判 `blocked`。

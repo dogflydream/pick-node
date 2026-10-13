@@ -394,7 +394,8 @@ input[type="search"]::-webkit-search-cancel-button { filter: invert(.6); }
   width: 100%;
   border-collapse: collapse;
   font-size: 13px;
-  min-width: 1040px;
+  /* 三列延迟指标让表格更宽, 提高最小宽度以保证列不挤压 */
+  min-width: 1240px;
 }
 .table thead th {
   position: sticky; top: 0; z-index: 2;

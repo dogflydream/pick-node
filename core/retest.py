@@ -92,6 +92,7 @@ class RetestManager:
         start_timeout: float = 12.0,
         kernel: str = "auto",
         check_antigravity: bool = True,
+        rtt_rounds: int = 3,
     ):
         self.root = Path(root)
         self.nodes_file = Path(nodes_file)
@@ -102,6 +103,7 @@ class RetestManager:
         self.start_timeout = start_timeout
         self.kernel = kernel
         self.check_antigravity = check_antigravity
+        self.rtt_rounds = max(1, rtt_rounds)
 
         self._lock = threading.RLock()
         self._state = JobState()
@@ -222,7 +224,8 @@ class RetestManager:
                 kernel_preference=self.kernel,
             )
             detector = Detector(timeout=self.timeout,
-                                do_antigravity=self.check_antigravity)
+                                do_antigravity=self.check_antigravity,
+                                rtt_rounds=self.rtt_rounds)
 
             def on_event(event: str, payload: dict) -> None:
                 if event == "result":

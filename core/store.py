@@ -163,6 +163,12 @@ class ResultStore:
         lats = [r.get("latency", 0) for r in rows
                 if isinstance(r.get("latency"), (int, float))
                 and r.get("latency", 0) > 0 and r.get("reachable")]
+        rtts = [r.get("rtt_min_ms", 0) for r in rows
+                if isinstance(r.get("rtt_min_ms"), (int, float))
+                and r.get("rtt_min_ms", 0) > 0 and r.get("reachable")]
+        ttfbs = [r.get("ttfb_ms", 0) for r in rows
+                 if isinstance(r.get("ttfb_ms"), (int, float))
+                 and r.get("ttfb_ms", 0) > 0 and r.get("reachable")]
 
         countries: dict[str, int] = {}
         protocols: dict[str, int] = {}
@@ -188,6 +194,10 @@ class ResultStore:
             "hk_redirect": count(lambda r: bool(r.get("hk_redirect"))),
             "avg_latency": int(sum(lats) / len(lats)) if lats else 0,
             "min_latency": int(min(lats)) if lats else 0,
+            "avg_rtt": int(sum(rtts) / len(rtts)) if rtts else 0,
+            "min_rtt": int(min(rtts)) if rtts else 0,
+            "avg_ttfb": int(sum(ttfbs) / len(ttfbs)) if ttfbs else 0,
+            "min_ttfb": int(min(ttfbs)) if ttfbs else 0,
             "countries": dict(sorted(countries.items(), key=lambda kv: -kv[1])),
             "protocols": dict(sorted(protocols.items(), key=lambda kv: -kv[1])),
             "error": self._error,
@@ -258,11 +268,25 @@ def _sort_key(row: dict[str, Any], sort: str):
     """生成排序键. 缺值一律排到最后, 避免 None 参与比较报错."""
     BIG = 10**9
 
+    if sort == "rtt":
+        # 链路往返 (小请求最小值) —— 最干净的快慢指标, 推荐默认用它比较
+        v = row.get("rtt_min_ms", 0)
+        if not isinstance(v, (int, float)) or v <= 0 or not row.get("reachable"):
+            return BIG
+        return v
+    if sort == "ttfb":
+        # google.com 首字节 (不含 body 下载)
+        v = row.get("ttfb_ms", 0)
+        if not isinstance(v, (int, float)) or v <= 0 or not row.get("reachable"):
+            return BIG
+        return v
     if sort == "latency":
         # 延迟排序要排除两类噪声:
         #   1) 未取到延迟 (0/None)
         #   2) 链路不可达的节点 —— 例如"剩余流量"这类信息节点响应极快(个位数毫秒),
         #      若不排除会把它们排到最前面, 看上去像"最快的节点".
+        # 注意: 这是"端到端含 body"的旧口径, 混入了下载 ~50KB 首页的时间,
+        #       横向比快慢请用 rtt / ttfb.
         v = row.get("latency", 0)
         if not isinstance(v, (int, float)) or v <= 0 or not row.get("reachable"):
             return BIG
@@ -275,13 +299,15 @@ def _sort_key(row: dict[str, Any], sort: str):
         return (str(row.get("tag", "") or ""),)
     if sort == "ip":
         return (str(row.get("ip", "") or "~"),)
-    # default: 可用优先 -> Gemini 档位 -> 延迟
+    # default: 可用优先 -> Gemini 档位 -> 链路快慢(用 rtt, 缺失回退 latency)
+    speed = row.get("rtt_min_ms", 0) or row.get("latency", 0)
+    if not isinstance(speed, (int, float)) or speed <= 0:
+        speed = BIG
     return (
         0 if is_potentially_usable(row) else 1,
         0 if row.get("google") == "success" else 1,
         GEMINI_ORDER.get(str(row.get("gemini", "")), 9),
-        row.get("latency", 0) if isinstance(row.get("latency"), (int, float))
-        and row.get("latency", 0) > 0 else BIG,
+        speed,
     )
 
 

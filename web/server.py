@@ -92,6 +92,7 @@ retest = RetestManager(
     start_timeout=float(_env("START_TIMEOUT", "12")),
     kernel=_env("KERNEL", "auto"),
     check_antigravity=_env_bool("CHECK_ANTIGRAVITY", True),
+    rtt_rounds=_env_int("RTT_ROUNDS", 3),
 )
 
 

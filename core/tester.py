@@ -52,12 +52,18 @@ class NodeResult:
     gemini_reason: str = ""
     antigravity: str = "unknown"
     antigravity_reason: str = ""
-    latency: int = 0
+    # ---- 延迟指标 (都含经过代理链路的开销) ----
+    latency: int = 0               # google.com 端到端 (含 body, 旧口径)
+    ttfb_ms: int = 0               # google.com 首字节 (不含 body 下载)
+    connect_ms: int = 0            # 小请求的连接建立耗时 (TCP+TLS)
+    rtt_min_ms: int = 0            # 小请求连测取最小值 —— 推荐用这个比快慢
+    rtt_samples: list[int] = field(default_factory=list)
     reachable: bool = False
     ok: bool = False               # 综合可用性
     confidence: str = "low"
     error: str = ""
     errors: list[str] = field(default_factory=list)
+    probes: list[dict[str, Any]] = field(default_factory=list)  # 各次探测明细
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -132,11 +138,17 @@ class Tester:
             res.antigravity = det.antigravity
             res.antigravity_reason = det.antigravity_reason
             res.latency = det.latency
+            res.ttfb_ms = det.ttfb_ms
+            res.connect_ms = det.connect_ms
+            res.rtt_min_ms = det.rtt_min_ms
+            res.rtt_samples = list(det.rtt_samples)
+            res.probes = list(det.probes)
             res.reachable = det.reachable
             res.confidence = det.confidence
             res.errors = list(det.errors)
 
             # 综合可用性: 链路通 + Google 可访问 + Gemini 不是明确被拒
+            # Antigravity 跟随 Gemini, 故无需单独判断.
             res.ok = bool(
                 det.reachable
                 and det.google == "success"
@@ -229,12 +241,17 @@ _OK_ORDER = {"available": 0, "likely": 1, "unknown": 2, "blocked": 3, "unavailab
 
 
 def sort_results(results: list[NodeResult]) -> list[NodeResult]:
-    """按"好不好用"排序: 可用 > 延迟低 > Gemini 优."""
+    """按"好不好用"排序: 可用 > Gemini 优 > 链路快.
+
+    排序用 rtt_min_ms (小请求往返最小值), 因为它排除了重定向与 body 下载,
+    最能反映节点本身快慢; 缺失时回退到 latency.
+    """
     def key(r: NodeResult):
+        speed = r.rtt_min_ms or r.latency or 10**7
         return (
             0 if r.ok else 1,
             _OK_ORDER.get(r.gemini, 9),
-            r.latency if r.latency > 0 else 10**7,
+            speed,
         )
 
     return sorted(results, key=key)
@@ -248,10 +265,19 @@ def summarize(results: list[NodeResult]) -> dict[str, Any]:
     gem_likely = sum(1 for r in results if r.gemini == "likely")
     ag_avail = sum(1 for r in results if r.antigravity == "available")
     ag_likely = sum(1 for r in results if r.antigravity == "likely")
+    risk_high = sum(1 for r in results
+                    if str(getattr(r, "risk_level", "none")) == "high")
+
     # 延迟统计只计入链路真正可达的节点.
     # 否则像"剩余流量: xx GB"这种纯信息节点(并非代理)会以个位数毫秒混入,
     # 让"最快延迟"变成无意义的 1ms.
-    lat = [r.latency for r in results if r.latency > 0 and r.reachable]
+    def vals(attr: str) -> list[int]:
+        return [v for r in results
+                if r.reachable and (v := getattr(r, attr, 0)) and v > 0]
+
+    rtts = vals("rtt_min_ms")
+    ttfbs = vals("ttfb_ms")
+    lats = vals("latency")
 
     from collections import Counter
 
@@ -266,8 +292,14 @@ def summarize(results: list[NodeResult]) -> dict[str, Any]:
         "gemini_likely": gem_likely,
         "antigravity_available": ag_avail,
         "antigravity_likely": ag_likely,
-        "avg_latency_ms": int(sum(lat) / len(lat)) if lat else 0,
-        "min_latency_ms": min(lat) if lat else 0,
+        "risk_high": risk_high,
+        # 三个延迟口径各自给出 均值/最快, 便于不同角度比较
+        "avg_rtt_ms": int(sum(rtts) / len(rtts)) if rtts else 0,
+        "min_rtt_ms": min(rtts) if rtts else 0,
+        "avg_ttfb_ms": int(sum(ttfbs) / len(ttfbs)) if ttfbs else 0,
+        "min_ttfb_ms": min(ttfbs) if ttfbs else 0,
+        "avg_latency_ms": int(sum(lats) / len(lats)) if lats else 0,
+        "min_latency_ms": min(lats) if lats else 0,
         "countries": dict(countries.most_common()),
         "protocols": dict(protocols.most_common()),
     }

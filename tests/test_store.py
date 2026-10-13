@@ -66,7 +66,13 @@ print(f"  [OK] 首个为可达节点, 延迟 {by_lat[0]['latency']}ms")
 
 dflt = store.query(sort="default")
 print(f"  sort=default 前3可用性 -> {[is_potentially_usable(r) for r in dflt[:3]]}")
-assert is_potentially_usable(dflt[0]), "默认排序首个应为潜在可用"
+# 仅当数据里确实存在可用节点时才要求"首个可用";
+# 某些批次 (或网络较差时的子集) 可能一个可用都没有, 那不算排序错误.
+if s["usable"] > 0:
+    assert is_potentially_usable(dflt[0]), "默认排序首个应为潜在可用"
+    print("  [OK] 默认排序把可用节点排在前面")
+else:
+    print("  [跳过] 本批数据没有可用节点, 无法验证排序优先级")
 
 # ---- 导出 (核心需求) ----
 print("\n--- 导出测试 ---")
@@ -104,3 +110,48 @@ for r in store.all():
 print("  [OK] 所有 blocked/unavailable/不可达节点均未混入导出")
 
 print("\nALL STORE TESTS PASSED")
+
+# ---------------------------------------------------------------- 数据一致性
+print()
+print("=" * 92)
+print("数据一致性检查 (判定规则: Google 与 Gemini 都 OK 才算可用)")
+print("=" * 92)
+
+allrows = store.all()
+
+# 1) 不允许 google=fail 而 gemini=available (自相矛盾)
+bad = [r for r in allrows
+       if r.get("google") != "success"
+       and r.get("gemini") in ("available", "likely")]
+check_ok = len(bad) == 0
+print(f"[{'OK  ' if check_ok else 'FAIL'}] 无 'google 失败但 gemini 可用' 的矛盾数据"
+      f"  ({len(bad)} 个)")
+assert check_ok, [r["tag"] for r in bad[:5]]
+
+# 2) Antigravity 必须与 Gemini 完全一致 (本版本改为跟随)
+diff = [r for r in allrows if r.get("gemini") != r.get("antigravity")]
+check_ok = len(diff) == 0
+print(f"[{'OK  ' if check_ok else 'FAIL'}] Antigravity 与 Gemini 判定完全一致"
+      f"  ({len(diff)} 个不一致)")
+assert check_ok, [(r["tag"], r["gemini"], r["antigravity"]) for r in diff[:5]]
+
+# 3) 延迟指标的大小关系: rtt (小请求最小) 不应大于端到端总耗时
+viol = [r for r in allrows
+        if r.get("rtt_min_ms") and r.get("latency")
+        and r["rtt_min_ms"] > r["latency"]]
+check_ok = len(viol) == 0
+print(f"[{'OK  ' if check_ok else 'FAIL'}] rtt_min_ms <= latency  ({len(viol)} 个违反)")
+assert check_ok
+
+# 4) 可用节点必须同时满足 google=success 且 gemini 在可用档
+usable = [r for r in allrows if is_potentially_usable(r)]
+bad2 = [r for r in usable
+        if r.get("google") != "success"
+        or r.get("gemini") not in ("available", "likely")]
+check_ok = len(bad2) == 0
+print(f"[{'OK  ' if check_ok else 'FAIL'}] 可用集合的 google/gemini 都达标"
+      f"  ({len(bad2)} 个违反)")
+assert check_ok
+
+print()
+print("ALL CONSISTENCY CHECKS PASSED")

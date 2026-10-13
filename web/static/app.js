@@ -45,6 +45,23 @@ function fmtLatency(ms) {
   return `<span class="mono ${cls}">${ms}</span><span class="dim mono"> ms</span>`;
 }
 
+/** 三个延迟口径的阈值不同, 分开着色:
+ *    RTT  (链路往返)   : 通常几百 ms
+ *    TTFB (首字节)     : 通常 1-3s
+ *    latency (端到端)  : 通常 2-6s (含下载首页)
+ */
+function fmtRtt(ms) {
+  if (!ms || ms <= 0) return '<span class="dim">–</span>';
+  const cls = ms < 400 ? 'lat--fast' : ms < 1000 ? 'lat--mid' : 'lat--slow';
+  return `<span class="mono ${cls}">${ms}</span><span class="dim mono"> ms</span>`;
+}
+
+function fmtTtfb(ms) {
+  if (!ms || ms <= 0) return '<span class="dim">–</span>';
+  const cls = ms < 1000 ? 'lat--fast' : ms < 2500 ? 'lat--mid' : 'lat--slow';
+  return `<span class="mono ${cls}">${ms}</span><span class="dim mono"> ms</span>`;
+}
+
 /** 可用性 -> 徽标 (text + tone) */
 function badgeFor(value) {
   const map = {
@@ -144,9 +161,11 @@ async function loadSummary() {
   $('m-gemini-hint').textContent =
     `可能可用 ${s.gemini_likely} · 受限 ${s.gemini_blocked}`;
   $('m-ag').textContent = s.antigravity_available;
-  $('m-ag-hint').textContent = `占比 ${s.total ? Math.round(s.antigravity_available / s.total * 100) : 0}%`;
-  $('m-lat').textContent = s.avg_latency ? s.avg_latency : '–';
-  $('m-lat-hint').textContent = s.min_latency ? `最快 ${s.min_latency} ms` : '无可用数据';
+  $('m-ag-hint').textContent = '跟随 Gemini';
+  $('m-rtt').textContent = s.avg_rtt ? s.avg_rtt : '–';
+  $('m-rtt-hint').textContent = s.min_rtt ? `最快 ${s.min_rtt} ms` : '无可用数据';
+  $('m-ttfb').textContent = s.avg_ttfb ? s.avg_ttfb : '–';
+  $('m-ttfb-hint').textContent = s.min_ttfb ? `最快 ${s.min_ttfb} ms` : '不含下载页面';
 
   // 地区分布 chips
   const wrap = $('geo-chips');
@@ -250,6 +269,8 @@ function render() {
       <td>${riskBadge(r)}</td>
       <td>${badgeFor(r.gemini)}</td>
       <td>${badgeFor(r.antigravity)}</td>
+      <td class="col-num">${fmtRtt(r.rtt_min_ms)}</td>
+      <td class="col-num">${fmtTtfb(r.ttfb_ms)}</td>
       <td class="col-num">${fmtLatency(r.latency)}</td>
     `;
     frag.appendChild(tr);
@@ -556,7 +577,9 @@ function paintResult(row) {
   const line = tr.closest('tr');
   if (!line) return;
   const tds = line.querySelectorAll('td');
-  if (tds.length < 9) return;
+  // 列数: 0=勾选 1=节点 2=协议 3=IP 4=地区 5=Google 6=风险
+  //       7=Gemini 8=Antigravity 9=RTT 10=首字节 11=总耗时
+  if (tds.length < 12) return;
   line.classList.add('is-fresh');
 
   const r = row;
@@ -566,7 +589,9 @@ function paintResult(row) {
   tds[6].innerHTML = riskBadge(r);
   tds[7].innerHTML = badgeFor(r.gemini);
   tds[8].innerHTML = badgeFor(r.antigravity);
-  tds[9].innerHTML = fmtLatency(r.latency);
+  tds[9].innerHTML = fmtRtt(r.rtt_min_ms);
+  tds[10].innerHTML = fmtTtfb(r.ttfb_ms);
+  tds[11].innerHTML = fmtLatency(r.latency);
   // 同步内存里的这条数据
   const item = state.items.find(x => x.node_id === r.node_id);
   if (item) Object.assign(item, r);

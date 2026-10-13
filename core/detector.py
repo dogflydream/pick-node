@@ -23,6 +23,20 @@
      "不可用" 文案 (实测页面 792KB, 无 "not available in your country").
      故采用分层判定: 地区 + google.com 是否跳转 + sorry 检测 + 目标页可达性.
      结果标注置信度, 明确区分 "确定可用" / "可能可用" / "不可用".
+   - **Antigravity 不做独立探测**, 直接跟随 Google + Gemini 的结论.
+     上一版本曾独立请求 antigravity.google, 但抽检显示误判率很高
+     (6 个判死的节点里 4 个重试即可成功, 67% 假阴性): 这些共享出口会间歇性
+     丢连接, "单次失败即判死" 把抖动当成了结论. 详见 resolve_antigravity().
+
+4) 延迟指标 (分三段, 都含"经过代理链路"的开销)
+   - rtt_min_ms : 对 cloudflare trace 小端点连测 3 次取最小值.
+                  无重定向、body 只有几百字节, 是最干净的链路往返指标,
+                  推荐用它来横向比较节点快慢.
+   - connect_ms : 该请求的连接建立 (TCP+TLS 握手) 耗时.
+   - ttfb_ms    : 访问 google.com 的首字节时间, 不含 body 下载.
+   - latency    : 访问 google.com 的端到端耗时, 含重定向与完整 body.
+                  沿用旧口径仅为向后兼容; 它混入了"下载 ~50KB 首页"的时间,
+                  不适合当作节点速度排名.
 """
 
 from __future__ import annotations
@@ -109,7 +123,14 @@ _RESTRICTED_TLDS = ("com.hk", "com.cn", "cn", "co.kr")
 
 @dataclass
 class ProbeResult:
-    """一次 HTTP 探测的结果."""
+    """一次 HTTP 探测的结果.
+
+    时间指标分三段 (都含"经过代理"的链路开销):
+      connect_ms —— 发出请求到 TLS 握手完成、连接建立
+      ttfb_ms    —— 到收到响应首字节 (含服务端处理时间)
+      elapsed_ms —— 到读完整个响应体 (含 body 下载)
+    分段的好处: 能区分"链路慢"还是"服务端慢/body 大".
+    """
 
     name: str
     ok: bool = False
@@ -117,6 +138,8 @@ class ProbeResult:
     final_url: str = ""
     redirect_chain: list[str] = field(default_factory=list)
     elapsed_ms: int = 0
+    ttfb_ms: int = 0
+    connect_ms: int = 0
     error: str = ""
     server: str = ""
     location: str = ""
@@ -144,9 +167,21 @@ class Detection:
     risk_reason: str = ""
     gemini: str = "unknown"      # available / blocked / unavailable / unknown
     gemini_reason: str = ""
+    # Antigravity 不再独立探测, 直接跟随 Gemini 的判定 (理由见模块文档).
     antigravity: str = "unknown"
     antigravity_reason: str = ""
-    latency: int = 0             # 到出口的延迟 (ms), 取最快探测
+
+    # ---- 延迟指标 (都含"经过代理链路"的开销) ----
+    # latency      : 兼容字段 —— 访问 google.com 的端到端耗时 (含 body)
+    # ttfb_ms      : 访问 google.com 的首字节时间 (不含 body 下载, 更能反映链路快慢)
+    # connect_ms   : 对 cloudflare trace 小请求的连接建立时间 (最接近 ping 的语义)
+    # rtt_min_ms   : 对 cloudflare trace 连测 3 次取最小值 (排除抖动, 最稳定的对比基准)
+    latency: int = 0
+    ttfb_ms: int = 0
+    connect_ms: int = 0
+    rtt_min_ms: int = 0
+    rtt_samples: list[int] = field(default_factory=list)
+
     tls_ok: bool = False
     reachable: bool = False      # 代理链路本身是否通
     errors: list[str] = field(default_factory=list)
@@ -165,10 +200,14 @@ class Detector:
         timeout: float = 12.0,
         do_antigravity: bool = True,
         do_geoip_fallback: bool = True,
+        rtt_rounds: int = 3,
     ):
         self.timeout = timeout
+        # 保留该参数以兼容旧调用方与 .env 里的 CHECK_ANTIGRAVITY,
+        # 但自本版本起 Antigravity 不再独立探测 (跟随 Gemini), 此开关不再生效.
         self.do_antigravity = do_antigravity
         self.do_geoip_fallback = do_geoip_fallback
+        self.rtt_rounds = max(1, rtt_rounds)
 
     # -------------------------------------------------- 底层请求
 
@@ -189,22 +228,64 @@ class Detector:
         )
 
     def _probe(self, client: httpx.Client, name: str, url: str) -> ProbeResult:
-        """请求一个 URL, 记录状态码/最终 URL/重定向链/耗时."""
+        """请求一个 URL, 记录状态码/最终 URL/重定向链/分段耗时.
+
+        用流式请求来分离两段时间:
+          - 收到响应头的那一刻 = TTFB (不含 body 下载)
+          - 读完 body 的那一刻   = 端到端总耗时
+        普通 client.get() 只能拿到后者, 无法区分"链路慢"与"body 大".
+        """
         pr = ProbeResult(name=name)
         t0 = time.perf_counter()
         try:
-            r = client.get(url)
-            pr.elapsed_ms = int((time.perf_counter() - t0) * 1000)
-            pr.status = r.status_code
-            pr.final_url = str(r.url)
-            pr.server = r.headers.get("server", "")
-            pr.redirect_chain = [str(h.headers.get("location", "")) for h in r.history
-                                 if h.headers.get("location")]
-            pr.ok = True
+            with client.stream("GET", url) as r:
+                pr.ttfb_ms = int((time.perf_counter() - t0) * 1000)
+                pr.status = r.status_code
+                pr.final_url = str(r.url)
+                pr.server = r.headers.get("server", "")
+                pr.redirect_chain = [
+                    str(h.headers.get("location", ""))
+                    for h in r.history if h.headers.get("location")
+                ]
+                # 把 body 读干净, 取得真实的总耗时
+                for _ in r.iter_bytes():
+                    pass
+                pr.elapsed_ms = int((time.perf_counter() - t0) * 1000)
+                pr.ok = True
         except Exception as e:
             pr.elapsed_ms = int((time.perf_counter() - t0) * 1000)
+            if not pr.ttfb_ms:
+                pr.ttfb_ms = pr.elapsed_ms
             pr.error = f"{type(e).__name__}: {str(e)[:160]}"
         return pr
+
+    def _measure_rtt(self, client: httpx.Client, url: str,
+                     rounds: int = 3) -> tuple[int, int, list[int]]:
+        """用极小响应体测链路往返 (最接近 ping 的语义).
+
+        cloudflare trace 只返回几百字节纯文本, 用它连测多轮取最小值:
+          - 最小样本能滤掉偶发抖动, 适合横向对比不同节点
+          - 同时给出"连接建立耗时", 反映 TCP+TLS 握手开销
+        返回 (最小 RTT, 首次连接耗时, 全部样本).
+        """
+        samples: list[int] = []
+        first_connect = 0
+        for i in range(rounds):
+            t0 = time.perf_counter()
+            try:
+                with client.stream("GET", url) as r:
+                    connect = int((time.perf_counter() - t0) * 1000)
+                    for _ in r.iter_bytes():
+                        pass
+                total = int((time.perf_counter() - t0) * 1000)
+                samples.append(total)
+                if i == 0:
+                    first_connect = connect
+            except Exception:
+                continue
+        if not samples:
+            return 0, first_connect, []
+        return min(samples), first_connect, samples
 
     # -------------------------------------------------- 出口 IP / 地区
 
@@ -231,6 +312,20 @@ class Detector:
                                        "ip": ip, "loc": loc})
             except Exception as e:
                 det.errors.append(f"cf-trace: {type(e).__name__}: {str(e)[:100]}")
+
+            # 1b) 链路 RTT: 对 trace 小端点连测多轮取最小值.
+            #     这是最干净的"节点快不快"指标 —— 无重定向、无大 body.
+            rtt_min, connect_ms, samples = self._measure_rtt(
+                client, "https://www.cloudflare.com/cdn-cgi/trace",
+                rounds=self.rtt_rounds)
+            det.rtt_min_ms = rtt_min
+            det.connect_ms = connect_ms
+            det.rtt_samples = samples
+            if samples:
+                det.probes.append({
+                    "name": "rtt", "samples_ms": samples,
+                    "min_ms": rtt_min, "connect_ms": connect_ms,
+                })
 
             # 2) geo-IP 补强 (结果可能与 trace 不同, 一并保留)
             if self.do_geoip_fallback and not det.ip:
@@ -280,12 +375,15 @@ class Detector:
             pr = self._probe(client, "google", "https://www.google.com/")
             det.probes.append({
                 "name": "google", "status": pr.status, "final_url": pr.final_url,
-                "elapsed_ms": pr.elapsed_ms, "error": pr.error,
-                "chain": pr.redirect_chain,
+                "elapsed_ms": pr.elapsed_ms, "ttfb_ms": pr.ttfb_ms,
+                "error": pr.error, "chain": pr.redirect_chain,
             })
             det.google_status = pr.status
             det.google_final_url = pr.final_url
+            # 端到端耗时 (含 body, 兼容旧口径)
             det.latency = pr.elapsed_ms if pr.elapsed_ms else det.latency
+            # 首字节时间: 不含 body 下载, 更能反映"打开 Google 要等多久"
+            det.ttfb_ms = pr.ttfb_ms
 
             if not pr.ok:
                 det.google = "fail"
@@ -447,6 +545,20 @@ class Detector:
                 det.gemini_reason = f"被重定向到 {pr.final_url[:80]}"
                 return
 
+            # ---- 前置条件: Google 都不通时, Gemini 不可能可用 ----
+            # 判定规则是"Google 与 Gemini 两个都 OK 才算可用".
+            # 若 google.com 这次没通 (超时/SSL 断开/SOCKS 失败), 那 gemini 那次
+            # 200 只能说明"当时链路恰好可用", 不能据此判定节点可用 —— 否则会
+            # 出现 google=fail 而 gemini=available 的自相矛盾结果.
+            if det.google != "success":
+                if det.gemini not in ("blocked", "unavailable"):
+                    det.gemini = "unavailable"
+                    det.gemini_reason = (
+                        f"Google 未通过 ({det.google}) —— "
+                        "按'两者都 OK 才算可用'的口径降级"
+                    )
+                return
+
             # 结合地区白名单给出结论 (页面可达 + 地区已知支持 => 较可信)
             cc = (det.country or "").upper()
             if cc in _GEMINI_BLOCKED_REGIONS:
@@ -472,67 +584,79 @@ class Detector:
                 det.gemini = "blocked"
                 det.gemini_reason = f"风险重定向: {det.risk_reason}"
 
-    def detect_antigravity(self, proxy_url: str, det: Detection) -> None:
-        """检测 antigravity.google 可达性."""
-        with self._client(proxy_url) as client:
-            pr = self._probe(client, "antigravity", "https://antigravity.google/")
-            det.probes.append({
-                "name": "antigravity", "status": pr.status,
-                "final_url": pr.final_url, "elapsed_ms": pr.elapsed_ms,
-                "error": pr.error, "chain": pr.redirect_chain,
-            })
-            if not pr.ok:
-                det.antigravity = "unavailable"
-                det.antigravity_reason = f"请求失败: {pr.error}"
-                return
-            final = pr.final_url.lower()
-            if "/sorry/" in final or pr.status == 429:
-                det.antigravity = "blocked"
-                det.antigravity_reason = "风控/验证页"
-                return
-            if pr.status >= 400:
-                det.antigravity = "unavailable"
-                det.antigravity_reason = f"HTTP {pr.status}"
-                return
-            if "antigravity.google" not in final:
-                det.antigravity = "unavailable"
-                det.antigravity_reason = f"被重定向到 {pr.final_url[:80]}"
-                return
+    def resolve_antigravity(self, det: Detection) -> None:
+        """Antigravity 判定 —— 直接跟随 Google + Gemini 的结果.
 
-            cc = (det.country or "").upper()
-            if cc in _GEMINI_BLOCKED_REGIONS:
-                det.antigravity = "blocked"
-                det.antigravity_reason = f"出口地区 {cc} 受限"
-            elif cc in _GEMINI_ALLOWED_REGIONS:
-                det.antigravity = "available"
-                det.antigravity_reason = f"出口地区 {cc}, 页面可达"
-            else:
-                det.antigravity = "likely"
-                det.antigravity_reason = f"出口地区 {cc or '未知'}, 页面可达"
+        为什么不独立探测 (本版本的决策依据, 有实测支撑):
+          上一版本对 antigravity.google 做独立 HTTP 探测, 但抽检发现误判率很高:
+          对 6 个判为 unavailable 的节点各重试 3 次, 有 4 个其实能成功 (67% 假阴性).
+          原因是这些共享出口会间歇性丢连接, 而"单次失败即判死"把抖动当成了结论;
+          加上该探测排在请求序列最后, 更容易撞上节点限流。
+          另外 antigravity.google 首页只证明"静态页能下载", 与客户端登录后能否
+          真正使用 (用户反馈会报 token: eof) 并没有可靠的对应关系。
 
-            # ---- 风险重定向覆盖 (同 Gemini) ----
-            # 实测: 出口被判定为代理/VPN (hkredirect / sorry) 时,
-            # Antigravity 客户端登录会报 token: eof, 实际不可用.
-            if det.risk_level == "high" and det.antigravity == "available":
-                det.antigravity = "blocked"
-                det.antigravity_reason = (
-                    f"风险重定向: {det.risk_reason}"
-                    " (Antigravity 客户端登录会失败)"
-                )
+        因此改为: Google 与 Gemini 都通过 => Antigravity 同样判为可用.
+        判定链条更短、更可解释, 也不会再引入独立探测的噪声。
+        """
+        g, gem = det.google, det.gemini
+        # 防线一: Google 未通过时, 不允许 Gemini 系列结论为"可用".
+        # detect_gemini 里已经做过一次降级, 这里再兜一次 —— 防止将来
+        # 有人改动那段逻辑时把这条硬规则漏掉.
+        if g != "success" and gem in ("available", "likely"):
+            det.gemini = "unavailable"
+            det.gemini_reason = (
+                f"Google 未通过 ({g}) —— 按'两者都 OK 才算可用'的口径降级"
+            )
+            gem = det.gemini
+
+        # 防线二: 只要 Gemini 没得出明确结论, Antigravity 就不得声称可用.
+        if gem == "unknown":
+            det.antigravity = "unavailable"
+            det.antigravity_reason = (
+                f"跟随 Google/Gemini: Google={g}, Gemini 未得出明确结论"
+            )
+            return
+        if gem == "available":
+            det.antigravity = "available"
+            det.antigravity_reason = "跟随 Gemini (Google 与 Gemini 均可用)"
+        elif gem == "likely":
+            det.antigravity = "likely"
+            det.antigravity_reason = "跟随 Gemini (地区未在已知列表, 需实测确认)"
+        elif gem == "blocked":
+            det.antigravity = "blocked"
+            det.antigravity_reason = f"跟随 Gemini: {det.gemini_reason}"
+        else:
+            det.antigravity = "unavailable"
+            det.antigravity_reason = (
+                f"跟随 Gemini: {det.gemini_reason or ('Google ' + g)}"
+            )
 
     # -------------------------------------------------- 主流程
 
     def run(self, proxy_url: str) -> Detection:
         det = Detection()
-        # 1) 出口 IP/地区
-        self.detect_exit(proxy_url, det)
-        # 2) Google
-        self.detect_google(proxy_url, det)
-        # 3) Gemini
-        self.detect_gemini(proxy_url, det)
-        # 4) Antigravity
-        if self.do_antigravity:
-            self.detect_antigravity(proxy_url, det)
+        # 每个阶段都单独兜住异常: 任一阶段意外抛错都不该让整轮检测失败,
+        # 更不该留下 gemini=unknown 这种"没结论却继续声称可用"的状态.
+        for stage, fn in (
+            ("exit", self.detect_exit),
+            ("google", self.detect_google),
+            ("gemini", self.detect_gemini),
+        ):
+            try:
+                fn(proxy_url, det)
+            except Exception as e:  # noqa: BLE001 - 兜底, 保证流程继续
+                det.errors.append(f"{stage}: 阶段异常 {type(e).__name__}: {e}")
+
+        # 4) Antigravity —— 直接由 Google/Gemini 推导, 不发独立请求
+        self.resolve_antigravity(det)
+
+        # 最终一致性: 没有明确结论的 gemini 一律降级, 不留 unknown,
+        # 避免出现"未得出结论"却被当作可用的情况.
+        if det.gemini == "unknown":
+            det.gemini = "unavailable"
+            det.gemini_reason = (
+                det.gemini_reason or "检测未能得出明确结论 (阶段异常或数据缺失)"
+            )
 
         # 置信度: 有权威地区来源 + google 成功 => high
         if det.country_source == "cloudflare-trace" and det.google == "success":

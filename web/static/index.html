@@ -113,9 +113,14 @@
         <span class="metric__hint" id="m-ag-hint">—</span>
       </div>
       <div class="metric">
-        <span class="metric__label">平均延迟</span>
-        <strong class="metric__value" id="m-lat">–</strong>
-        <span class="metric__hint" id="m-lat-hint">最快 –</span>
+        <span class="metric__label">链路 RTT</span>
+        <strong class="metric__value" id="m-rtt">–</strong>
+        <span class="metric__hint" id="m-rtt-hint">最快 –</span>
+      </div>
+      <div class="metric">
+        <span class="metric__label">首字节</span>
+        <strong class="metric__value" id="m-ttfb">–</strong>
+        <span class="metric__hint" id="m-ttfb-hint">最快 –</span>
       </div>
     </div>
   </section>
@@ -164,7 +169,9 @@
         <label class="field__label" for="f-sort">排序</label>
         <select id="f-sort">
           <option value="default">推荐优先</option>
-          <option value="latency">延迟最低</option>
+          <option value="rtt">链路 RTT 最低</option>
+          <option value="ttfb">首字节最快</option>
+          <option value="latency">总耗时最短</option>
           <option value="country">按地区</option>
           <option value="protocol">按协议</option>
           <option value="tag">按名称</option>
@@ -222,7 +229,12 @@
             <th scope="col">风险</th>
             <th scope="col">Gemini</th>
             <th scope="col">Antigravity</th>
-            <th scope="col" class="sortable col-num" data-sort="latency" aria-sort="none">延迟</th>
+            <th scope="col" class="sortable col-num" data-sort="rtt"
+                aria-sort="none" title="链路往返（小请求连测取最小值）—— 推荐用它比较节点快慢">RTT</th>
+            <th scope="col" class="sortable col-num" data-sort="ttfb"
+                aria-sort="none" title="google.com 首字节时间（不含下载页面）">首字节</th>
+            <th scope="col" class="sortable col-num" data-sort="latency"
+                aria-sort="none" title="google.com 端到端总耗时（含下载约 50KB 首页）">总耗时</th>
           </tr>
         </thead>
         <tbody id="tbody"></tbody>
