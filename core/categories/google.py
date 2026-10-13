@@ -167,6 +167,10 @@ class GoogleCategory(Category):
 
             # 4) Antigravity: 跟随 Gemini, 但地区用更严的 api 口径
             ag_bad, ag_why = region_status(cc, "api")
+            # 地区未知 (cc 为空) 且链路本身不通时, 不应报"地区受限" ——
+            # 那是错误归因. 这类节点统一按 unavailable 处理.
+            if ag_bad and not cc and gv != "available":
+                ag_bad, ag_why = False, ""
             if ag_bad:
                 av, ar = "blocked", f"{ag_why} (Gemini 网页版仍可用)"
             elif mv == "available":

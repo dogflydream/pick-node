@@ -133,17 +133,23 @@ print("5. 代理池同步")
 print("=" * 92)
 pool = (ROOT / "proxiers_google.txt").read_text(encoding="utf-8")
 lines = [x for x in pool.strip().split("\n") if x.strip()]
-# 池子内容应与"当前结果里判定可用"的节点一致 —— 数量可以为 0
-# (重测的节点可能都不可用), 那不算失败.
+# 池内容应与"所有结果文件里判定可用"的节点一致 (并集).
+# 为什么是并集: 未指定分类的重测会把池按各结果文件重建, 避免用局部结果
+# 覆盖掉全量池 (曾经踩过: 池被覆盖成空).
 from core.store import ResultStore, is_potentially_usable  # noqa: E402
 
-_pool_store = ResultStore(ROOT / "results_google.json")
-_expect = [str(r.get("node", "")).strip()
-           for r in _pool_store.all()
-           if is_potentially_usable(r) and str(r.get("node", "")).strip()]
-check("代理池与可用集合一致",
-      set(lines) == set(_expect),
-      f"池 {len(lines)} 条 vs 可用 {len(_expect)} 条")
+_expect_set: set[str] = set()
+for _p in [ROOT / "results.json", ROOT / "results_google.json",
+           ROOT / "results_xai.json"]:
+    if not _p.is_file():
+        continue
+    for _r in ResultStore(_p).all():
+        _u = str(_r.get("node", "")).strip()
+        if _u and is_potentially_usable(_r):
+            _expect_set.add(_u)
+check("代理池与可用集合一致 (各结果文件并集)",
+      set(lines) == _expect_set,
+      f"池 {len(lines)} 条 vs 可用 {len(_expect_set)} 条")
 check("代理池均为合法 URI",
       all(x.startswith(("vless://", "vmess://", "trojan://", "ss://",
                         "hysteria2://", "hy2://", "tuic://")) for x in lines))

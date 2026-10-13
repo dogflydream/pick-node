@@ -147,16 +147,37 @@ class _MultiStore:
                 if cur is None:
                     merged[nid] = dict(r)
                     continue
-                # 合并 categories (逐分类累积)
-                cats = dict(cur.get("categories") or {})
-                cats.update(r.get("categories") or {})
-                cur["categories"] = cats
-                # 补齐缺失的字段 (不覆盖已有非空值)
-                for k, v in r.items():
-                    if k == "categories":
-                        continue
-                    if not cur.get(k) and v:
-                        cur[k] = v
+
+                # 同 node_id 在多个文件里出现时, 谁的"信息更新"以谁为准.
+                # 实测问题: results.json 里是旧记录 (gemini=blocked, 无 categories),
+                # results_google.json 里是新记录 (gemini=available, 有 categories),
+                # 若简单保留先到者, 旧值会赢 -> 出现"结论可用但字段说 blocked".
+                cur_cats = cur.get("categories") or {}
+                new_cats = r.get("categories") or {}
+                new_is_newer = len(new_cats) >= len(cur_cats)
+
+                # categories 恒取并集 (逐分类累积)
+                merged_cats = dict(cur_cats)
+                merged_cats.update(new_cats)
+
+                if new_is_newer:
+                    # 新记录信息更全/更新: 以它为准, 但保留旧的独有分类结论
+                    base = dict(r)
+                    base["categories"] = merged_cats
+                    # 用旧记录补齐新记录缺失的字段
+                    for k, v in cur.items():
+                        if k == "categories":
+                            continue
+                        if not base.get(k) and v:
+                            base[k] = v
+                    merged[nid] = base
+                else:
+                    cur["categories"] = merged_cats
+                    for k, v in r.items():
+                        if k == "categories":
+                            continue
+                        if not cur.get(k) and v:
+                            cur[k] = v
         with self._lock:
             self._rows = list(merged.values())
             self._mtime = newest

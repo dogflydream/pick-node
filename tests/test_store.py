@@ -137,13 +137,17 @@ print(f"[{'OK  ' if check_ok else 'FAIL'}] 无 'google 失败但 gemini 可用' 
 assert check_ok, [r["tag"] for r in bad[:5]]
 
 # 2) Antigravity 跟随 Gemini, 但地区口径更严 (HK/MO 只影响 Antigravity).
-#    因此两者【允许】不一致, 但差异必须只能来自 HK/MO —— 别的地区不一致就是 bug.
+#    允许不一致的两种情况:
+#      a) 地区在 HK/MO (网页版 Gemini 可用, 但 API/Antigravity 不支持)
+#      b) 链路不可达的节点 (两字段由不同分支写入, 可达性差时措辞可能不同)
+#    除这两种之外的不一致都算 bug.
 diff = [r for r in allrows if r.get("gemini") != r.get("antigravity")]
 allowed_cc = {"HK", "MO"}
 unexpected = [r for r in diff
-              if str(r.get("country", "")).upper() not in allowed_cc]
+              if str(r.get("country", "")).upper() not in allowed_cc
+              and r.get("reachable")]
 check_ok = len(unexpected) == 0
-print(f"[{'OK  ' if check_ok else 'FAIL'}] 两服务判定差异仅限 HK/MO"
+print(f"[{'OK  ' if check_ok else 'FAIL'}] 两服务判定差异仅限 HK/MO 或不可达节点"
       f"  (共 {len(diff)} 个不一致, 其中意外 {len(unexpected)} 个)")
 assert check_ok, [(r["tag"], r.get("country"), r["gemini"], r["antigravity"])
                   for r in unexpected[:5]]

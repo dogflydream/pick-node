@@ -120,8 +120,16 @@ check("导出的 URI 全部来自潜在可用集合",
 check("潜在可用节点无遗漏", usable_uris <= set(lines),
       f"遗漏 {len(usable_uris - set(lines))} 条")
 
-# 严格校验: 被限制的节点不得出现
-blocked_uris = {i["node"] for i in c.get("/api/nodes", params={"gemini": "blocked"}).json()["items"]}
+# 严格校验: 被限制的节点不得出现.
+# 注意: 要用【同一个数据源】去取被限制集合 —— 不同分类文件里的字段含义不同
+# (例如 xai 结果里没有 gemini 字段), 混用会得到假阳性.
+_cat = c.get("/api/meta").json().get("file", "results.json")
+_blocked_params = {"gemini": "blocked"}
+if _cat.startswith("results_") and _cat != "results.json":
+    _ckey = _cat[len("results_"):-len(".json")]
+    _blocked_params["category"] = _ckey
+blocked_uris = {i["node"] for i in
+                c.get("/api/nodes", params=_blocked_params).json()["items"]}
 check("被限制节点未混入导出", not (set(lines) & blocked_uris),
       f"混入 {len(set(lines) & blocked_uris)} 条")
 
