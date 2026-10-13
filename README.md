@@ -63,24 +63,87 @@ fastapi 0.143.0 / uvicorn 0.54.0
 
 ---
 
-## 3. 快速开始
+## 3. 安装与运行
 
 ### 3.1 安装依赖
 
-```powershell
-cd C:\Users\hxy\Desktop\code\test-connection
+推荐用 [uv](https://docs.astral.sh/uv/)：一条命令完成虚拟环境创建与依赖同步。
 
-# 如果还没有虚拟环境
+```powershell
+cd proxy-tester-3.0.0
+
+# 安装 uv (已装过可跳过)
+powershell -c "irm https://astral.sh/uv/install.ps1 | iex"
+
+# 建虚拟环境并同步依赖
 uv venv
 uv sync
+```
 
-# 或者用 pip
+`uv sync` 会按 `pyproject.toml` / `uv.lock` 装好 `httpx[socks]`、`fastapi`、`uvicorn`，
+不需要手动逐个 `pip install`。
+
+没有 uv 也可以用标准库的 venv：
+
+```powershell
+python -m venv .venv
 .venv\Scripts\python.exe -m pip install "httpx[socks]" fastapi uvicorn
 ```
 
-### 3.2 准备节点
+### 3.2 准备配置
 
-把代理 URI 一行一个写入 `proxiers.txt`：
+```powershell
+copy .env.example .env
+```
+
+然后编辑 `.env`，把 `V2RAYN_BIN` 改成你机器上 v2rayN 的 `bin` 目录。工具会在该目录下
+自动寻找 `sing_box\` 与 `xray\` 子目录，通常不需要另装内核。
+
+### 3.3 运行
+
+**Web 面板（推荐）**：
+
+```powershell
+.venv\Scripts\python.exe web\server.py
+```
+
+然后浏览器打开 `http://127.0.0.1:8787`。在页面右上角点「导入节点」粘贴代理链接
+（一行一个），再点「重新检测」即可。
+
+换端口：`--port 9000`；改代码后自动重载：`--reload`。
+
+**命令行**：
+
+```powershell
+.venv\Scripts\python.exe main.py                  # 用 .env 与默认文件名
+.venv\Scripts\python.exe main.py -c 20            # 20 并发
+.venv\Scripts\python.exe main.py --only-usable    # 代理池只留综合可用节点
+```
+
+**跑测试**（可选）：
+
+```powershell
+.venv\Scripts\python.exe tests\test_parser.py
+.venv\Scripts\python.exe tests\test_verdicts.py
+.venv\Scripts\python.exe tests\test_import.py
+```
+
+### 3.4 发布包里有什么
+
+发布包（`proxy-tester-3.0.0-src.zip`）**只有源码**，不含节点、结果与内核。
+
+| 有 | 没有（需自备） |
+| --- | --- |
+| `core/` `web/` `main.py` 全部源码 | 代理节点链接（`proxiers.txt`） |
+| `README.md` 与配置模板 `.env.example` | 内核 `sing-box.exe` / `xray.exe` |
+| `tests/` 回归测试、`tools/` 构建脚本 | 虚拟环境与历史结果 |
+
+> 内核直接用你已装的 v2rayN 自带的那份即可，工具会自动在
+> `V2RAYN_BIN` 下寻找 `sing_box\` 与 `xray\` 子目录。
+
+### 3.5 节点文件格式
+
+命令行模式默认读取 `proxiers.txt`，把代理 URI 一行一个写进去：
 
 ```
 vless://uuid@example.com:443?encryption=none&security=reality&sni=...&pbk=...&sid=...#节点名
@@ -92,19 +155,14 @@ ss://base64methodpass@example.com:8388#节点名
 - 空行、`#` 与 `//` 开头的行会被忽略
 - 重复节点会自动去重
 - 解析失败的行会被跳过并打印原因，不会中断整体流程
+- **用 Web 面板的话不用手写这个文件**，页面里「导入节点」会帮你写
 
-### 3.3 运行
-
-```powershell
-.venv\Scripts\python.exe main.py
-```
-
-实时输出：
+### 3.6 命令行输出示例
 
 ```
-[OK]   VLESS     SG   1973ms  🇸🇬AWS新加坡01  Gemini AVAILABLE Antigravity AVAILABLE
-[NO]   HYSTERIA2 HK   1691ms  🇭🇰香港无限7     <出口地区 HK 不在 Gemini 支持范围>
-[NO]   VLESS     US   1019ms  🇺🇸美国圣何塞02   <出口地区 US (支持列表), 页面可达>
+[OK]   VLESS     SG   1973ms  AWS新加坡01      Gemini AVAILABLE Antigravity AVAILABLE
+[NO]   HYSTERIA2 HK   1691ms  香港无限7        <出口地区 HK 不在 Gemini 支持范围>
+[NO]   VLESS     US   1019ms  美国圣何塞02     <出口地区 US (支持列表), 页面可达>
 ```
 
 ---
@@ -333,7 +391,7 @@ CHECK_ANTIGRAVITY=true
 [
   {
     "node": "vless://uuid@pq.aws63.yydjc.top:443?...",
-    "tag": "🇸🇬AWS新加坡01 | 电信移动联通推荐",
+    "tag": "AWS新加坡01 | 电信移动联通推荐",
     "node_id": "a266c9d0c910",
     "protocol": "VLESS",
     "server": "pq.aws63.yydjc.top",

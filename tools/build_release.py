@@ -27,6 +27,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+# 让中文在 Windows 控制台正常显示 (否则输出会是乱码)
+from core.util import setup_console  # noqa: E402
+
+setup_console()
+
 # 允许打进发布包的文件 (git 跟踪的白名单 + 额外模板)
 EXTRA_FILES = [".env.example"]
 
