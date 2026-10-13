@@ -15,6 +15,10 @@ const state = {
   meta: null,
   empty: true,        // 是否"尚无任何检测结果" (用于区分首次使用与筛选无匹配)
   retest: { running: false, es: null, total: 0, done: 0 },  // 重新检测状态
+  // ---- 分类 ----
+  cats: [],           // 后端返回的分类列表 [{key,label,count,exists}]
+  cat: '',            // 当前选中的分类 key
+  catServices: [],    // 当前分类的服务 key 列表 (表格列)
 };
 
 const $ = (id) => document.getElementById(id);
@@ -98,7 +102,166 @@ function riskBadge(row) {
   return '<span class="badge badge--idle">正常</span>';
 }
 
+// ---------------------------------------------------------------- 分类
+
+/** 加载分类列表并渲染页签 */
+async function loadCategories() {
+  try {
+    const d = await api('/api/categories');
+    state.cats = d.categories || [];
+  } catch (_) {
+    state.cats = [];
+  }
+
+  const nav = $('cats');
+  const list = $('cats-list');
+  if (!state.cats.length) {
+    nav.hidden = true;
+    return;
+  }
+  nav.hidden = false;
+
+  // 保持当前选择; 若未选择则用第一个有数据的分类
+  const withData = state.cats.filter(c => c.count > 0);
+  if (!state.cat || !state.cats.some(c => c.key === state.cat)) {
+    state.cat = (withData[0] || state.cats[0]).key;
+  }
+
+  list.innerHTML = state.cats.map(c => `
+    <button type="button" class="cat${c.count ? '' : ' cat--empty'}"
+            role="tab" data-cat="${esc(c.key)}"
+            aria-selected="${c.key === state.cat}">
+      <span class="cat__name">${esc(c.label)}</span>
+      <span class="cat__n">${c.count}</span>
+    </button>`).join('');
+
+  list.querySelectorAll('.cat').forEach(btn => {
+    btn.addEventListener('click', () => selectCategory(btn.dataset.cat));
+  });
+
+  const cur = state.cats.find(c => c.key === state.cat);
+  $('cats-hint').textContent = cur && cur.count
+    ? `${cur.file} · ${cur.count} 条`
+    : (cur ? `还没有 ${cur.label} 的检测结果` : '');
+
+  updateTableHead();
+}
+
+/** 表头随分类变化.
+ *
+ *  分类模式:  结论 + 明细            (2 列)
+ *  非分类模式: Google + 风险 + Gemini + Antigravity  (4 列)
+ *
+ *  用 JS 重建 thead 的服务列, 避免"隐藏列"导致表头与单元格错位。
+ */
+function updateTableHead() {
+  const tr = document.querySelector('#nodes-table thead tr');
+  if (!tr) return;
+
+  // 移除所有动态列 (标记 data-dyn)
+  tr.querySelectorAll('th[data-dyn]').forEach(th => th.remove());
+
+  // 找到"地区"列, 在它之后插入
+  const anchor = [...tr.querySelectorAll('th')].find(
+    th => (th.textContent || '').trim() === '地区');
+  const insertAfter = el => anchor ? anchor.after(el) : tr.appendChild(el);
+
+  if (state.cat) {
+    const mk = (text, cls) => {
+      const th = document.createElement('th');
+      th.scope = 'col';
+      th.textContent = text;
+      th.dataset.dyn = '1';
+      if (cls) th.className = cls;
+      return th;
+    };
+    insertAfter(mk('结论', 'col-verdict'));
+    insertAfter(mk('明细', 'col-svc'));
+  } else {
+    ['Google', '风险', 'Gemini', 'Antigravity'].forEach(t => {
+      const th = document.createElement('th');
+      th.scope = 'col';
+      th.textContent = t;
+      th.dataset.dyn = '1';
+      insertAfter(th);
+    });
+  }
+}
+
+/** 切换分类: 重置选择 → 重新拉取该分类的数据 */
+async function selectCategory(key) {
+  if (key === state.cat) return;
+  state.cat = key;
+  state.selected.clear();
+  // 选中态即时反馈
+  document.querySelectorAll('.cat').forEach(b => {
+    b.setAttribute('aria-selected', String(b.dataset.cat === key));
+  });
+  const cur = state.cats.find(c => c.key === state.cat);
+  $('cats-hint').textContent = cur && cur.count
+    ? `${cur.file} · ${cur.count} 条` : `还没有 ${cur ? cur.label : ''} 的检测结果`;
+
+  await refreshAll();
+}
+
+/** 取当前分类下某条结果的服务明细 */
+function svcOf(row) {
+  const c = (row.categories || {})[state.cat];
+  return (c && c.services) || {};
+}
+
+/** 当前分类的结论 */
+function verdictOf(row) {
+  const c = (row.categories || {})[state.cat];
+  return c ? String(c.verdict || '') : '';
+}
+
+function catLabel(key) {
+  const c = state.cats.find(x => x.key === key);
+  return c ? c.label : key.toUpperCase();
+}
+
+// ---------------------------------------------------------------- 分类单元
+
+/** 分类结论徽标 */
+function verdictCell(row) {
+  const v = verdictOf(row);
+  const c = (row.categories || {})[state.cat] || {};
+  const reason = String(c.reason || '');
+  if (!v) {
+    return '<td class="col-verdict"><span class="verdict verdict--unavailable"'
+         + ' title="该节点没有此分类的检测结果">未测</span></td>';
+  }
+  const text = { available: '可用', blocked: '受限', unavailable: '不可用' }[v] || v;
+  const cls = { available: 'available', blocked: 'blocked',
+                unavailable: 'unavailable' }[v] || 'unavailable';
+  return `<td class="col-verdict"><span class="verdict verdict--${cls}"`
+       + ` title="${esc(reason)}">${esc(text)}</span></td>`;
+}
+
+/** 各服务的结论小标签 */
+function servicesCell(row) {
+  const svcs = svcOf(row);
+  const c = (row.categories || {})[state.cat] || {};
+  const reasons = c.reasons || {};
+  const keys = Object.keys(svcs);
+  if (!keys.length) return '<td class="col-svc"><span class="dim">–</span></td>';
+  const html = keys.map(k => {
+    const v = String(svcs[k]);
+    const cls = v === 'available' ? 'ok'
+              : v === 'blocked' ? 'bad'
+              : v === 'likely' ? 'warn' : 'idle';
+    const label = { available: '可用', blocked: '受限',
+                    unavailable: '不可用', likely: '可能可用' }[v] || v;
+    const tip = reasons[k] || '';
+    return `<span class="svc svc--${cls}" title="${esc(k + ': ' + tip)}">`
+         + `${esc(k)} ${esc(label)}</span>`;
+  }).join('');
+  return `<td class="col-svc"><div class="svc-row">${html}</div></td>`;
+}
+
 // ---------------------------------------------------------------- 数据加载
+
 
 async function api(path) {
   const r = await fetch(path, { headers: { 'Accept': 'application/json' } });
@@ -116,18 +279,31 @@ function currentQuery() {
   if (s) p.set('search', s);
   if ($('f-country').value) p.set('country', $('f-country').value);
   if ($('f-protocol').value) p.set('protocol', $('f-protocol').value);
-  if ($('f-gemini').value) p.set('gemini', $('f-gemini').value);
-  if ($('f-ag').value) p.set('antigravity', $('f-ag').value);
-  if ($('f-risk').value) p.set('risk', $('f-risk').value);
+  // 分类模式下用分类结论筛选; 否则用旧的 Google 维度
+  if (state.cat) {
+    p.set('category', state.cat);
+    const svc = $('f-svc');
+    if (svc && svc.value) p.set('cat_verdict', svc.value);
+  } else {
+    if ($('f-gemini').value) p.set('gemini', $('f-gemini').value);
+    if ($('f-ag').value) p.set('antigravity', $('f-ag').value);
+    if ($('f-risk').value) p.set('risk', $('f-risk').value);
+  }
   if ($('f-usable').checked) p.set('usable_only', 'true');
   p.set('sort', state.sort);
   p.set('order', state.order);
   return p.toString();
 }
 
+/** 带分类参数的 URL */
+function withCat(path) {
+  if (!state.cat) return path;
+  return path + (path.includes('?') ? '&' : '?') + 'category=' + encodeURIComponent(state.cat);
+}
+
 async function loadMeta() {
   try {
-    const m = await api('/api/meta');
+    const m = await api(withCat('/api/meta'));
     state.meta = m;
     const el = $('data-meta');
     state.empty = !m.exists || m.count === 0;
@@ -173,21 +349,41 @@ function showAlert(msg) { const b = $('alert-box'); b.textContent = msg; b.hidde
 function hideAlert() { $('alert-box').hidden = true; }
 
 async function loadSummary() {
-  const s = await api('/api/summary');
+  const s = await api(withCat('/api/summary'));
   $('m-usable').textContent = s.usable;
-  $('m-usable-hint').textContent = s.strict_usable === s.usable
-    ? '可达 + Google 通 + Gemini 未被拒'
-    : `其中严格可用 ${s.strict_usable}`;
   $('m-total').textContent = s.total;
   $('m-total-hint').textContent = `链路可达 ${s.reachable}`;
-  $('m-google').textContent = s.google_ok;
-  $('m-google-hint').textContent = s.total
-    ? `${Math.round(s.google_ok / s.total * 100)}% 成功率` : '–';
-  $('m-gemini').textContent = s.gemini_available;
-  $('m-gemini-hint').textContent =
-    `可能可用 ${s.gemini_likely} · 受限 ${s.gemini_blocked}`;
-  $('m-ag').textContent = s.antigravity_available;
-  $('m-ag-hint').textContent = '跟随 Gemini';
+
+  // 分类模式: 指标卡展示该分类的结论分布; 非分类模式: 保留 Google 维度
+  const cs = (s.categories || {})[state.cat];
+  if (state.cat && cs) {
+    $('m-usable-hint').textContent = `${catLabel(state.cat)} 结论为可用的节点`;
+    $('m-google').textContent = cs.available || 0;
+    $('m-google-hint').textContent = '该分类判定可用';
+    $('m-gemini').textContent = cs.blocked || 0;
+    $('m-gemini-hint').textContent = '被拒绝 (含 CF 封禁)';
+    $('m-ag').textContent = cs.unavailable || 0;
+    $('m-ag-hint').textContent = '连接失败等';
+    // 服务级明细写进卡片标题, 让用户一眼看到测了哪些服务
+    const svcNames = Object.keys(cs.services || {});
+    if (svcNames.length) {
+      $('m-usable-hint').textContent =
+        `${catLabel(state.cat)} · 服务 ${svcNames.join(', ')}`;
+    }
+  } else {
+    $('m-usable-hint').textContent = s.strict_usable === s.usable
+      ? '可达 + Google 通 + Gemini 未被拒'
+      : `其中严格可用 ${s.strict_usable}`;
+    $('m-google').textContent = s.google_ok;
+    $('m-google-hint').textContent = s.total
+      ? `${Math.round(s.google_ok / s.total * 100)}% 成功率` : '–';
+    $('m-gemini').textContent = s.gemini_available;
+    $('m-gemini-hint').textContent =
+      `可能可用 ${s.gemini_likely} · 受限 ${s.gemini_blocked}`;
+    $('m-ag').textContent = s.antigravity_available;
+    $('m-ag-hint').textContent = '跟随 Gemini';
+  }
+
   $('m-rtt').textContent = s.avg_rtt ? s.avg_rtt : '–';
   $('m-rtt-hint').textContent = s.min_rtt ? `最快 ${s.min_rtt} ms` : '无可用数据';
   $('m-ttfb').textContent = s.avg_ttfb ? s.avg_ttfb : '–';
@@ -222,7 +418,7 @@ function syncChips() {
 }
 
 async function loadFacets() {
-  const f = await api('/api/facets');
+  const f = await api(withCat('/api/facets'));
   state.facets = f;
 
   const fill = (sel, list, labeler, keepAll) => {
@@ -248,6 +444,28 @@ async function loadFacets() {
        i => `${gemLabels[i.value] || i.value} (${i.count})`, true);
   fill($('f-ag'), f.antigravity || [],
        i => `${gemLabels[i.value] || i.value} (${i.count})`, true);
+
+  // ---- 分类模式: 用「服务结论」筛选取代 Google 维度筛选 ----
+  const fieldSvc = $('field-svc');
+  const svcSel = $('f-svc');
+  if (state.cat) {
+    fieldSvc.hidden = false;
+    // 统计当前分类下各结论的数量 (available / blocked / unavailable)
+    const counts = { available: 0, blocked: 0, unavailable: 0 };
+    (state.items || []).forEach(r => {
+      const v = verdictOf(r);
+      if (v in counts) counts[v] += 1;
+    });
+    // 数量以该分类全部结果为准 (不受当前筛选影响), 用 summary 更稳
+    svcSel.innerHTML = '<option value="">全部</option>' + [
+      ['available', '可用'],
+      ['blocked', '受限/封禁'],
+      ['unavailable', '不可用'],
+    ].map(([v, label]) => `<option value="${v}">${label}</option>`).join('');
+    $('f-svc-label').textContent = `${catLabel(state.cat)} 结论`;
+  } else {
+    fieldSvc.hidden = true;
+  }
 }
 
 // ---------------------------------------------------------------- 表格渲染
@@ -295,10 +513,9 @@ function render() {
       <td><span class="proto">${esc(r.protocol || '–')}</span></td>
       <td class="col-ip mono">${r.ip ? esc(r.ip) : '<span class="dim">–</span>'}</td>
       <td>${geoLabel(r.country)}</td>
-      <td>${badgeFor(r.google)}</td>
-      <td>${riskBadge(r)}</td>
-      <td>${badgeFor(r.gemini)}</td>
-      <td>${badgeFor(r.antigravity)}</td>
+      ${state.cat ? verdictCell(r) + servicesCell(r)
+                  : badgeFor(r.google) + riskBadge(r)
+                    + badgeFor(r.gemini) + badgeFor(r.antigravity)}
       <td class="col-num">${fmtRtt(r.rtt_min_ms)}</td>
       <td class="col-num">${fmtTtfb(r.ttfb_ms)}</td>
       <td class="col-num">${fmtLatency(r.latency)}</td>
@@ -617,6 +834,8 @@ async function startRetest() {
   const ids = [...state.selected];
   const body = {};
   if (ids.length) body.node_ids = ids;
+  // 当前选中的分类 —— 后端只跑该分类的体检
+  if (state.cat) body.categories = [state.cat];
   const c = parseInt($('rt-concurrency').value, 10);
   if (c > 0) body.concurrency = c;
 
@@ -826,8 +1045,9 @@ function bind() {
     t = setTimeout(loadNodes, 220);
   });
 
-  ['f-country', 'f-protocol', 'f-gemini', 'f-ag', 'f-risk'].forEach(id => {
-    $(id).addEventListener('change', () => { syncChips(); loadNodes(); });
+  ['f-country', 'f-protocol', 'f-gemini', 'f-ag', 'f-risk', 'f-svc'].forEach(id => {
+    const el = $(id);
+    if (el) el.addEventListener('change', () => { syncChips(); loadNodes(); });
   });
   $('f-usable').addEventListener('change', loadNodes);
   $('f-sort').addEventListener('change', () => {
@@ -961,6 +1181,7 @@ function bind() {
 
 (async function init() {
   bind();
+  await loadCategories();      // 先确定分类, 后续请求都带上它
   await refreshAll();
   await resumeRetestIfRunning();
 })();

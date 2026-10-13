@@ -152,6 +152,13 @@
     <div class="prog__log mono" id="rt-log"></div>
   </section>
 
+  <!-- ============ 分类切换 ============ -->
+  <nav class="cats" id="cats" aria-label="检测分类" hidden>
+    <span class="cats__label">分类</span>
+    <div class="cats__list" id="cats-list" role="tablist"></div>
+    <span class="cats__hint" id="cats-hint"></span>
+  </nav>
+
   <!-- ============ 指标卡 ============ -->
   <section aria-labelledby="metrics-heading">
     <h2 class="sr-only" id="metrics-heading">总体指标</h2>
@@ -239,6 +246,11 @@
         </select>
       </div>
 
+      <div class="field" id="field-svc" hidden>
+        <label class="field__label" for="f-svc" id="f-svc-label">服务</label>
+        <select id="f-svc"><option value="">全部</option></select>
+      </div>
+
       <div class="field">
         <label class="field__label" for="f-sort">排序</label>
         <select id="f-sort">
@@ -299,10 +311,7 @@
             <th scope="col" class="sortable" data-sort="protocol" aria-sort="none">协议</th>
             <th scope="col" class="sortable col-ip" data-sort="ip" aria-sort="none">出口 IP</th>
             <th scope="col" class="sortable" data-sort="country" aria-sort="none">地区</th>
-            <th scope="col">Google</th>
-            <th scope="col">风险</th>
-            <th scope="col">Gemini</th>
-            <th scope="col">Antigravity</th>
+            <!-- 服务列由前端按当前分类动态生成 (见 updateTableHead) -->
             <th scope="col" class="sortable col-num" data-sort="rtt"
                 aria-sort="none" title="链路往返（小请求连测取最小值）—— 推荐用它比较节点快慢">RTT</th>
             <th scope="col" class="sortable col-num" data-sort="ttfb"
