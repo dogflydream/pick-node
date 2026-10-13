@@ -31,10 +31,13 @@ sys.path.insert(0, str(ROOT))
 EXTRA_FILES = [".env.example"]
 
 # 绝对不能进发布包的东西 (打包后校验用)
-FORBIDDEN = [
-    "proxiers.txt", "proxiers_google.txt", "results.json",
-    ".env", ".venv/", "configs/", "__pycache__",
-]
+# 注意: 这里按"文件名精确匹配 + 目录片段"判断, 不能用子串匹配 ——
+# 否则 .env.example 会被 ".env" 误伤 (它是模板, 本来就该随包分发).
+FORBIDDEN_NAMES = {
+    "proxiers.txt", "proxiers_google.txt", "proxies.txt",
+    "results.json", ".env",
+}
+FORBIDDEN_PARTS = {".venv", "configs", "__pycache__", ".git"}
 
 
 def sh(args: list[str], **kw) -> str:
@@ -57,6 +60,17 @@ def version() -> str:
         if s.startswith("version"):
             return s.split("=", 1)[1].strip().strip('"').strip("'")
     return "0.0.0"
+
+
+_failures: list[str] = []
+
+
+def check(name: str, ok: bool, detail: str = "") -> None:
+    """打包过程中的断言式检查; 失败只记录, 最后统一决定退出码."""
+    mark = "OK  " if ok else "FAIL"
+    print(f"  [{mark}] {name}" + (f"  {detail}" if detail else ""))
+    if not ok:
+        _failures.append(name)
 
 
 def main() -> int:
@@ -100,22 +114,24 @@ def main() -> int:
     # ---- 校验 1: 禁止文件不得入包
     with zipfile.ZipFile(zip_path) as z:
         names = z.namelist()
-        bad = [n for n in names
-               if any(f in n for f in FORBIDDEN)]
-    if bad:
-        print(f"\n[错误] 发布包含有禁止文件: {bad}")
-        return 1
-    print(f"  [OK] 不含凭据/结果/虚拟环境 (共 {len(names)} 个条目)")
+
+    def is_forbidden(entry: str) -> bool:
+        p = Path(entry)
+        if p.name in FORBIDDEN_NAMES:
+            return True
+        return any(part in FORBIDDEN_PARTS for part in p.parts)
+
+    bad = [n for n in names if is_forbidden(n)]
+    check("不含凭据/结果/虚拟环境", not bad,
+          f"共 {len(names)} 个条目" + (f", 违规: {bad}" if bad else ""))
+    check(".env.example 应随包分发", f"{name}/.env.example" in names)
 
     # ---- 校验 2: 必须包含的关键文件
     required = ["main.py", "README.md", "pyproject.toml",
                 "core/detector.py", "web/server.py",
                 "web/static/index.html", "web/static/app.js", "web/static/style.css"]
     missing = [r for r in required if f"{name}/{r}" not in names]
-    if missing:
-        print(f"\n[错误] 发布包缺少关键文件: {missing}")
-        return 1
-    print(f"  [OK] 关键文件齐全")
+    check("关键文件齐全", not missing, f"缺少: {missing}" if missing else "")
 
     # ---- 校验 3: 解压后代码可导入
     tmp = Path(tempfile.mkdtemp())
@@ -133,18 +149,17 @@ def main() -> int:
             errors="replace",
         )
         if r.returncode != 0:
-            print(f"\n[错误] 解压后源码语法检查失败:\n{r.stdout}\n{r.stderr}")
-            return 1
-        print("  [OK] 解压后全部 .py 语法正常")
+            check("解压后全部 .py 语法正常", False,
+                  f"{r.stdout.strip()} {r.stderr.strip()}"[:200])
+        else:
+            check("解压后全部 .py 语法正常", True)
 
         # 再确认一遍解压目录里没有凭据
         leaked = [str(p.relative_to(ex)) for p in ex.rglob("*")
                   if p.is_file() and p.name in
-                  {"proxiers.txt", "proxiers_google.txt", "results.json"}]
-        if leaked:
-            print(f"\n[错误] 解压后仍有凭据文件: {leaked}")
-            return 1
-        print("  [OK] 解压后无凭据文件")
+                  {"proxiers.txt", "proxiers_google.txt", "results.json", ".env"}]
+        check("解压后无凭据文件", not leaked,
+              f"发现: {leaked}" if leaked else "")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -215,7 +230,10 @@ Get-FileHash {zip_path.name} -Algorithm SHA256
     )
     print(f"  已写入: {notes.name}")
     print("=" * 84)
-    print("  构建完成")
+    if _failures:
+        print(f"  构建失败, 以下检查未通过: {_failures}")
+        return 1
+    print("  构建完成, 全部检查通过")
     print("=" * 84)
     return 0
 
