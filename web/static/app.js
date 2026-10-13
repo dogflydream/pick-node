@@ -13,6 +13,7 @@ const state = {
   order: 'asc',
   facets: { countries: [], protocols: [], gemini: [] },
   meta: null,
+  empty: true,        // 是否"尚无任何检测结果" (用于区分首次使用与筛选无匹配)
   retest: { running: false, es: null, total: 0, done: 0 },  // 重新检测状态
 };
 
@@ -129,19 +130,43 @@ async function loadMeta() {
     const m = await api('/api/meta');
     state.meta = m;
     const el = $('data-meta');
-    if (!m.exists) {
-      el.textContent = '结果文件不存在: ' + m.file;
-      showAlert('尚未生成 ' + m.file + '，请先运行：python main.py');
-    } else if (m.error) {
+    state.empty = !m.exists || m.count === 0;
+
+    if (m.error && m.exists) {
       el.textContent = m.file + ' · ' + m.error;
       showAlert(m.error);
+    } else if (state.empty) {
+      // 全新启动: 还没有任何检测结果.
+      // 这里【不】让用户去跑命令行 —— 面板自己就能导入并检测.
+      el.textContent = `尚无检测结果 · 节点 ${m.node_count ?? 0} 个`;
+      showOnboarding(m);
     } else {
       el.textContent = `${m.file} · ${m.count} 条 · 更新于 ${m.updated_at || '未知'}`;
       hideAlert();
+      hideOnboarding();
     }
   } catch (e) {
     showAlert('无法读取数据源: ' + e.message);
   }
+}
+
+/** 首次使用引导: 告诉用户下一步该做什么, 并直接给按钮 */
+function showOnboarding(m) {
+  const box = $('onboarding');
+  if (!box) return;
+  const pending = m.node_count ?? 0;
+  $('ob-text').innerHTML = pending > 0
+    ? `已导入 <strong>${pending}</strong> 个节点，但还没有检测结果。点下面的按钮开始检测。`
+    : '还没有节点，也没有检测结果。<strong>把代理链接粘贴进来就能开始</strong>，不需要命令行。';
+  $('ob-import').textContent = pending > 0 ? '再导入一些节点' : '导入节点';
+  $('ob-test').hidden = pending === 0;
+  $('ob-test').textContent = `检测这 ${pending} 个节点`;
+  box.hidden = false;
+}
+
+function hideOnboarding() {
+  const box = $('onboarding');
+  if (box) box.hidden = true;
 }
 
 function showAlert(msg) { const b = $('alert-box'); b.textContent = msg; b.hidden = false; }
@@ -237,8 +262,10 @@ function render() {
   if (!items.length) {
     tb.innerHTML = '';
     empty.hidden = false;
-    $('empty-text').textContent = state.meta && !state.meta.exists
-      ? '尚无检测结果，请先运行 python main.py'
+    // 区分两种"空": 真的还没测过 (引导用户去导入), 还是筛选筛没了
+    const noResults = state.empty;
+    $('empty-text').textContent = noResults
+      ? '还没有检测结果 —— 点上方「导入节点」粘贴代理链接即可开始'
       : '没有符合当前筛选条件的节点';
     updateSelectionUI();
     return;
@@ -869,6 +896,18 @@ function bind() {
   // ---- 导入节点
   $('btn-import').addEventListener('click', openImport);
   $('btn-import-close').addEventListener('click', closeImport);
+
+  // ---- 首次引导里的按钮
+  const obImport = $('ob-import');
+  if (obImport) obImport.addEventListener('click', openImport);
+  const obTest = $('ob-test');
+  if (obTest) {
+    obTest.addEventListener('click', () => {
+      // 有节点但没结果: 直接开测, 跳过勾选确认
+      if (state.retest.running) return;
+      startRetest();
+    });
+  }
   $('btn-import-clear').addEventListener('click', () => {
     $('import-text').value = '';
     resetImportPreview();

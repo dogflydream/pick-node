@@ -66,83 +66,64 @@ fastapi 0.143.0 / uvicorn 0.54.0
 
 ## 3. 安装与运行
 
-### 3.1 安装依赖
-
-推荐用 [uv](https://docs.astral.sh/uv/)：一条命令完成虚拟环境创建与依赖同步。
+### 3.1 三步跑起来
 
 ```powershell
-cd proxy-tester-3.0.0
+git clone https://github.com/dogflydream/pick-node.git
+cd pick-node
 
-# 安装 uv (已装过可跳过)
-powershell -c "irm https://astral.sh/uv/install.ps1 | iex"
-
-# 建虚拟环境并同步依赖
 uv venv
 uv sync
+uv run proxy-tester-web
 ```
 
-`uv sync` 会按 `pyproject.toml` / `uv.lock` 装好 `httpx[socks]`、`fastapi`、`uvicorn`，
-不需要手动逐个 `pip install`。
+浏览器打开终端里提示的地址（默认 `http://127.0.0.1:8787`），然后：
 
-没有 uv 也可以用标准库的 venv：
+1. 点右上角 **导入节点**，把代理链接粘贴进去（一行一个，自动去重）
+2. 点 **重新检测**，开始真实体检
+3. 测完在表格里看结果，点 **导出潜在可用 URI** 拿走可用的节点
 
-```powershell
-python -m venv .venv
-.venv\Scripts\python.exe -m pip install "httpx[socks]" fastapi uvicorn
-```
+**不需要预先准备节点文件，也不需要跑命令行**。空着手启动面板就行。
 
-### 3.2 准备配置
+> `uv run proxy-tester-web` 等价于 `.venv\Scripts\python.exe web\server.py`。
+> 端口被占用时会自动往后找一个可用端口，并在终端里提示实际地址。
+
+### 3.2 配置内核路径（首次建议做一次）
 
 ```powershell
 copy .env.example .env
 ```
 
-然后编辑 `.env`，把 `V2RAYN_BIN` 改成你机器上 v2rayN 的 `bin` 目录。工具会在该目录下
-自动寻找 `sing_box\` 与 `xray\` 子目录，通常不需要另装内核。
+编辑 `.env`，把 `V2RAYN_BIN` 指向你机器上 v2rayN 的 `bin` 目录。工具会自动在其中
+寻找 `sing_box\` 与 `xray\` 子目录。
 
-### 3.3 运行
+**没有配置也能跑** —— 默认会去 `C:\software\v2rayN-windows-64\bin` 找；
+找不到时启动面板会提示，检测时会给出明确报错。
 
-**Web 面板（推荐）**：
+### 3.3 用命令行批量检测（可选）
+
+不想用网页时：
 
 ```powershell
+uv run proxy-tester              # 用 .env 与默认文件名
+uv run proxy-tester -c 20        # 20 并发
+uv run proxy-tester --only-usable
+```
+
+命令行需要 `proxiers.txt`（一行一个 URI）。**如果文件不存在，工具会自动创建一份
+带示例注释的模板**，并提示你可以直接用 Web 面板导入。
+
+### 3.4 其他安装方式
+
+没有 uv 时，用标准库 venv：
+
+```powershell
+python -m venv .venv
+.venv\Scripts\python.exe -m pip install "httpx[socks]" fastapi uvicorn
 .venv\Scripts\python.exe web\server.py
 ```
 
-然后浏览器打开 `http://127.0.0.1:8787`。在页面右上角点「导入节点」粘贴代理链接
-（一行一个），再点「重新检测」即可。
-
-换端口：`--port 9000`；改代码后自动重载：`--reload`。
-
-**命令行**：
-
-```powershell
-.venv\Scripts\python.exe main.py                  # 用 .env 与默认文件名
-.venv\Scripts\python.exe main.py -c 20            # 20 并发
-.venv\Scripts\python.exe main.py --only-usable    # 代理池只留综合可用节点
-```
-
-**跑测试**（可选）：
-
-```powershell
-.venv\Scripts\python.exe tests\test_parser.py
-.venv\Scripts\python.exe tests\test_verdicts.py
-.venv\Scripts\python.exe tests\test_import.py
-```
-
-### 3.4 发布包里有什么
-
-发布包（`proxy-tester-3.0.0-src.zip`）**只有源码**，不含节点、结果与内核。
-
-| 有 | 没有（需自备） |
-| --- | --- |
-| `core/` `web/` `main.py` 全部源码 | 代理节点链接（`proxiers.txt`） |
-| `README.md` 与配置模板 `.env.example` | 内核 `sing-box.exe` / `xray.exe` |
-| `tests/` 回归测试、`tools/` 构建脚本 | 虚拟环境与历史结果 |
-
-> 内核直接用你已装的 v2rayN 自带的那份即可，工具会自动在
-> `V2RAYN_BIN` 下寻找 `sing_box\` 与 `xray\` 子目录。
-
-### 3.5 节点文件格式
+### 3.5 节点文件格式（命令行模式）
 
 命令行模式默认读取 `proxiers.txt`，把代理 URI 一行一个写进去：
 
@@ -158,7 +139,25 @@ ss://base64methodpass@example.com:8388#节点名
 - 解析失败的行会被跳过并打印原因，不会中断整体流程
 - **用 Web 面板的话不用手写这个文件**，页面里「导入节点」会帮你写
 
-### 3.6 命令行输出示例
+### 3.6 跑测试（可选）
+
+```powershell
+uv run python tests\test_parser.py
+uv run python tests\test_verdicts.py
+uv run python tests\test_import.py
+```
+
+### 3.7 发布包里有什么
+
+发布包（`dist/proxy-tester-*-src.zip`）**只有源码**，不含节点、结果与内核。
+
+| 有 | 没有（需自备） |
+| --- | --- |
+| `core/` `web/` `main.py` 全部源码 | 代理节点链接（`proxiers.txt`） |
+| `README.md` 与配置模板 `.env.example` | 内核 `sing-box.exe` / `xray.exe` |
+| `tests/` 回归测试、`tools/` 构建脚本 | 虚拟环境与历史结果 |
+
+### 3.8 命令行输出示例
 
 ```
 [OK]   VLESS     SG   1973ms  AWS新加坡01      Gemini AVAILABLE Antigravity AVAILABLE

@@ -1,6 +1,6 @@
 [project]
 name = "proxy-tester"
-version = "3.0.3"
+version = "3.0.4"
 description = "代理节点批量体检工具: 检测出口地区 / Google / Gemini 可用性, 并导出可用节点 URI"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -15,7 +15,25 @@ dependencies = [
 ]
 
 [project.urls]
-Documentation = "https://github.com/"
+Homepage = "https://github.com/dogflydream/pick-node"
+Repository = "https://github.com/dogflydream/pick-node"
 
+# 两个入口:
+#   proxy-tester       命令行批量检测
+#   proxy-tester-web   Web 面板 (推荐新用户)
 [project.scripts]
 proxy-tester = "main:main"
+proxy-tester-web = "web.server:main"
+
+# 声明构建后端, 否则 uv 会把它当"非打包项目",
+# 从而跳过 entry points (实测会遇到 'Skipping installation of entry points' 警告,
+# 且 `uv run proxy-tester` 不可用). 用 setuptools 让它成为可安装包.
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+py-modules = ["main"]
+
+[tool.setuptools.packages.find]
+include = ["core*", "web*", "tools*"]

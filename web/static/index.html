@@ -53,6 +53,23 @@
 
   <section class="alert alert--warn" id="alert-box" hidden role="status"></section>
 
+  <!-- ============ 首次使用引导 (无节点/无结果时显示) ============ -->
+  <section class="onboard" id="onboarding" hidden aria-labelledby="ob-heading">
+    <div class="onboard__body">
+      <h2 class="onboard__title" id="ob-heading">开始使用</h2>
+      <p class="onboard__text" id="ob-text"></p>
+      <ol class="onboard__steps">
+        <li>点「导入节点」，把代理链接粘贴进去（一行一个，会自动去重）</li>
+        <li>点「开始检测」，工具会为每个节点起一个独立内核实例并真实访问 Google</li>
+        <li>测完在这里看结果，并可一键导出可用的节点</li>
+      </ol>
+    </div>
+    <div class="onboard__actions">
+      <button type="button" class="btn btn--primary" id="ob-import">导入节点</button>
+      <button type="button" class="btn btn--accent" id="ob-test" hidden>开始检测</button>
+    </div>
+  </section>
+
   <!-- ============ 导入节点 ============ -->
   <section class="panel panel--import" id="import-panel" hidden
            aria-labelledby="import-heading">

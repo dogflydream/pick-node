@@ -160,12 +160,19 @@ def api_meta() -> dict[str, Any]:
             mtime = datetime.fromtimestamp(p.stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S")
         except OSError:
             mtime = None
+    # 已导入的节点数 —— 前端据此判断是"还没导入"还是"导入了但没测"
+    try:
+        node_count = len(retest.existing_ids())
+    except Exception:
+        node_count = 0
+
     return {
         "file": p.name,
         "exists": exists,
         "updated_at": mtime,
         "count": len(store.all()),
         "error": store.error,
+        "node_count": node_count,
         # 供前端确认条显示当前默认配置
         "concurrency": retest.concurrency,
         "nodes_file": retest.nodes_file.name,
@@ -361,6 +368,34 @@ if STATIC_DIR.is_dir():
 # ---------------------------------------------------------------- 入口
 
 
+def _port_free(host: str, port: int) -> bool:
+    """检查端口是否可绑定."""
+    import socket
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            s.bind((host, port))
+            return True
+        except OSError:
+            return False
+
+
+def _pick_port(host: str, preferred: int) -> int:
+    """优先用指定端口; 被占用则自动往后找一个可用的.
+
+    这样用户不会因为 8787 被占 (比如上一次没关干净) 就卡住,
+    这也是实测中遇到过的摩擦点。
+    """
+    if _port_free(host, preferred):
+        return preferred
+    for p in range(preferred + 1, preferred + 20):
+        if _port_free(host, p):
+            print(f"  [提示] 端口 {preferred} 已被占用, 自动改用 {p}")
+            return p
+    return preferred   # 都占用了就交给 uvicorn 报错
+
+
 def main() -> int:
     setup_console()
     import argparse
@@ -375,13 +410,31 @@ def main() -> int:
     args = ap.parse_args()
 
     store.load()
-    n = len(store.all())
+    result_count = len(store.all())
+    try:
+        node_count = len(retest.existing_ids())
+    except Exception:
+        node_count = 0
+
+    port = _pick_port(args.host, args.port)
+
     print("=" * 72)
     print("  代理节点体检面板")
     print("=" * 72)
-    print(f"  数据文件 : {store.path}")
-    print(f"  节点数量 : {n}" + (f"   (注意: {store.error})" if store.error else ""))
-    print(f"  访问地址 : http://{args.host}:{args.port}")
+    print(f"  访问地址 : http://{args.host}:{port}")
+    print(f"  节点文件 : {retest.nodes_file}  (已导入 {node_count} 个节点)")
+    print(f"  结果文件 : {store.path}  ({result_count} 条结果)")
+
+    # 首次使用引导: 明确告诉用户接下来在网页里做什么, 而不是让他去跑命令行
+    if result_count == 0:
+        print("-" * 72)
+        print("  还没有检测结果. 直接用浏览器打开上面的地址:")
+        print("    1) 右上角点「导入节点」, 粘贴代理链接 (一行一个)")
+        print("    2) 点「重新检测」开始体检")
+        print("    3) 测完可一键导出可用节点")
+        if node_count == 0:
+            print()
+            print("  提示: 你也可以直接把节点写进上面那个节点文件, 再刷新页面.")
     if args.host not in ("127.0.0.1", "localhost"):
         print("  [警告] 已监听非本机地址, 结果含节点凭据, 请勿在公网暴露")
     print("=" * 72)
@@ -389,7 +442,7 @@ def main() -> int:
     uvicorn.run(
         "web.server:app" if args.reload else app,
         host=args.host,
-        port=args.port,
+        port=port,
         reload=args.reload,
         log_level="warning",
     )

@@ -256,8 +256,25 @@ def main(argv: list[str] | None = None) -> int:
 
     # ---- 读取节点
     if not in_file.is_file():
-        print(f"[错误] 找不到节点文件: {in_file}", file=sys.stderr)
-        print("       请准备一个一行一个 URI 的文本文件, 或用 -i 指定路径.", file=sys.stderr)
+        # 首次使用最常见的情况: 还没有节点文件.
+        # 不要只报错 —— 直接给出两条可走的路, 并顺手建一个空白文件.
+        print(f"[提示] 还没有节点文件: {in_file.name}")
+        try:
+            in_file.write_text(
+                "# 一行一个代理 URI, 例如:\n"
+                "# vless://uuid@example.com:443?security=tls&sni=example.com#节点名\n"
+                "# hysteria2://password@example.com:443?sni=example.com#节点名\n",
+                encoding="utf-8",
+            )
+            print(f"       已创建空白模板: {in_file}")
+        except OSError:
+            pass
+        print()
+        print("  推荐做法 (不用手写文件):")
+        print(f"     {Path(sys.executable).name} web\\server.py")
+        print("     然后浏览器打开提示的地址, 点「导入节点」粘贴链接即可.")
+        print()
+        print("  或者: 把节点写进上面的文件, 或指定别的文件: main.py -i 你的文件.txt")
         return 2
 
     text = in_file.read_text(encoding="utf-8-sig", errors="replace")
@@ -278,7 +295,16 @@ def main(argv: list[str] | None = None) -> int:
         print()
 
     if not good:
-        print("[错误] 没有可测试的节点.", file=sys.stderr)
+        # 给出可执行的下一步, 而不是只说"没有节点"
+        print(f"[提示] {in_file.name} 里没有可测试的节点"
+              + (f" (共 {len(bad)} 行无法解析)" if bad else " (文件是空的或只有注释)"))
+        print()
+        print("  推荐做法 (不用手写文件):")
+        print(f"     {Path(sys.executable).name} web\\server.py")
+        print("     浏览器打开后点「导入节点」, 粘贴代理链接即可 (会自动去重).")
+        print()
+        print("  或: 检查链接是否为完整的 URI (需以 vless:// vmess:// trojan://")
+        print("      ss:// hysteria2:// tuic:// 开头).")
         return 2
 
     # ---- 定位内核

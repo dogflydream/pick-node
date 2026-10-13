@@ -136,6 +136,32 @@ button, input, select { font: inherit; color: inherit; }
   display: flex; flex-direction: column; gap: var(--space-5);
 }
 
+/* ---------- 首次使用引导 ---------- */
+.onboard {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: var(--space-5); flex-wrap: wrap;
+  padding: var(--space-5) var(--space-5);
+  background: linear-gradient(135deg, rgba(34,197,94,.10), rgba(56,189,248,.08));
+  border: 1px solid rgba(56, 189, 248, .34);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-card);
+}
+.onboard__title {
+  font-size: 15px; font-weight: 600; margin-bottom: var(--space-2);
+}
+.onboard__text {
+  font-size: 13.5px; line-height: 1.7; color: var(--color-foreground);
+  margin-bottom: var(--space-3);
+}
+.onboard__text strong { color: var(--color-accent); }
+.onboard__steps {
+  margin: 0; padding-left: 1.25em;
+  font-size: 13px; line-height: 1.9;
+  color: var(--color-muted-foreground);
+}
+.onboard__steps li::marker { color: var(--color-accent); font-weight: 600; }
+.onboard__actions { display: flex; gap: var(--space-2); flex-wrap: wrap; }
+
 /* ---------- 提示条 ---------- */
 .alert {
   padding: var(--space-3) var(--space-4);
